@@ -1,0 +1,3703 @@
+---
+title: "RNA21105TP Paper work"
+author: "Justin Anderson"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(error = 0,
+                      warning = FALSE,
+                      tidy = TRUE)
+# Default kable table
+kableDefault <- function(table, ...) {
+  knitr::kable(table, ...) %>%
+    kable_styling(full_width = T,
+                  fixed_thead = T,
+                  bootstrap_options = c("hover","striped"))
+}
+
+
+theme_JQA <- function(x) {
+  theme_bw(base_size = 12) +
+    theme(panel.border = element_blank(),
+          axis.title = element_text(face = "bold"),
+          legend.title = element_text(face = "bold"),
+          plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+          strip.text = element_text(face = "bold"),
+          panel.grid.minor = element_blank(),
+          legend.background = element_blank(),
+          legend.box.background = element_blank(),
+          legend.key = element_blank())
+}
+
+```
+
+# Libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(kableExtra)
+library(ggplot2)
+
+library(ggpubr)
+library(ggstatsplot)
+library(patchwork)
+library(colorspace)
+
+library(ComplexHeatmap)
+library(viridis)
+library(circlize)
+
+source("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/JQA_WGCNA_Functions.R")
+```
+
+This is a collection of analysis for the production of the paper. It includes any numbers/etc provided in the paper, as well the direct production of any figures present in the paper. This is intended to published alongside the paper at the PARC github.
+
+# Methods
+
+## Data Gathering
+
+### Genes
+Information on the dropped genes, performed in D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/DE_Analysis/RNA211105TP_CEA_DE_Analysis_JQA_LOCAL.Rmd
+```{r}
+#Load the raw count file to get number of genes and gene like features
+geneReadsOriginal <- read.table("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/DE_Analysis/RNA211105TP.txt",
+                               header = T,  stringsAsFactors = F,
+                               sep = "\t", row.names = 1)
+tmp_totalGenes <- nrow(geneReadsOriginal)
+rm(geneReadsOriginal)
+
+#All information on dropped genes in the annotation
+load("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/DE_Analysis/RNA211105TP_CEA_Gene_Sample_Info.RData")
+
+#Load some DE data
+load("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/DE_Analysis/RNA211105TP_CEA_DE.RData")
+
+
+#Load WGCNA Data
+#We just want tree from here
+load("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/Coexpression_Analysis/HighConn_All/RNA211105TP_CeA_modules.RData")
+
+load("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/Coexpression_Analysis/HighConn_All/RNA211105TP_WGCNA.RData")
+
+# #cell types
+# cellMarkers_Mid <- read_csv("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference//mmc3.csv",
+#                    show_col_types = FALSE)
+# cellMarkers_Fine <- read_csv("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference//mmc4.csv",
+#                    show_col_types = FALSE)
+# cellMarkers_Coarse <- read_csv("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference//mmc2.csv",
+#                    show_col_types = FALSE)
+# 
+# markersGABA <- unique(c((cellMarkers_Coarse %>%
+#                              filter(cell_type == "GABAergic") %>%
+#                              pull(gene)),
+#                           (cellMarkers_Mid %>%
+#                              filter(group == "GABAergic") %>%
+#                              pull(gene))))
+# 
+# 
+# markersGlut <- unique(c((cellMarkers_Coarse %>%
+#                              filter(cell_type == "Glutamatergic") %>%
+#                              pull(gene)),
+#                           (cellMarkers_Mid %>%
+#                              filter(group == "Glutamatergic") %>%
+#                              pull(gene))))
+```
+
+
+```{r}
+#Some basic info
+sprintf("Raw counts for %d genes and gene like features.\n", tmp_totalGenes) %>%
+  cat
+sprintf("A total of %d genes passed filtering, meaning %d were dropped.\n", 
+        nrow(fit_all$genes),
+        tmp_totalGenes - nrow(fit_all$genes)) %>%
+  cat
+
+droppedGenes %>% 
+  count(reason) %>%
+  arrange(desc(n)) %>%
+  ungroup() %>%
+  mutate(perc=n/sum(n)) %>% 
+  kableDefault(caption = "Dropped gene reason")
+
+
+fit_all$genes %>% 
+  count(gene_biotype) %>%
+  arrange(desc(n)) %>%
+  ungroup() %>%
+  mutate(perc=n/sum(n)) %>% 
+  kableDefault(caption = "Selected gene biotype")
+
+droppedGenes %>% 
+  count(gene_biotype) %>%
+  arrange(desc(n)) %>%
+  ungroup() %>%
+  mutate(perc=n/sum(n)) %>% 
+  kableDefault(caption = "Dropped gene biotype")
+```
+
+### PCA
+We begin by examining the PCA. Below is a table of the one-way Anova P-value associated with each PCA and our biological variables of interest. Those which are significant (FDR < 0.05) have been highlighted red.  The bottom two rows are the total explained variance associated with the biological variable of interest for: (all) all PCS which are signifcant, (max) all PCS where the variable is the most significantly associated. The overall impression is that there is that SxG is a significant factor:
+1. PCS 1, 9, 10 and 11 are not associated with any of our variables of interest. These correspond to roughly 30% of the total explained variance.
+2. Library prep batch is associated with ~9% of the total explained variance.
+3. Sex and genotype appear to have an interaction in regards to explained variance
+
+```{r}
+test <- c("LibraryPrepBatch","Sex", "Genotype", "SxG") %>% sapply(function(x) {
+  c(plottingData_PCA$anova %>%
+      filter(!!sym(x) < 0.05) %>%
+      pull(var) %>% sum,
+    plottingData_PCA$anova %>%
+      filter(!!sym(x) < 0.05) %>%
+      filter(prinFactor == x) %>%
+      pull(var) %>% sum)
+    }
+  )
+test <- round(test*100, digits=1)
+test <- as.data.frame(test)
+test$PC = c("All", "Max")
+
+plottingData_PCA$anova %>%
+  rowwise() %>%
+  filter(any(c_across(1:4)<0.05)) %>%
+  ungroup() %>%
+  mutate(PC = paste0("PC", PC," (",round(var*100, digits = 1), "%)")) %>%
+  select(PC, LibraryPrepBatch, Sex, Genotype, SxG) %>%
+  mutate(across(where(is.numeric), function(x) round(-log10(x), digits = 2))) %>%
+  mutate(across(where(is.numeric), 
+                function(x) {
+                  x = cell_spec(x, background = ifelse(x>-log10(0.05),"red","white"))
+                  }
+                )) %>%
+  rbind(test) %>%
+  kableDefault(escape = F,
+               full_width = F,
+               caption = "PCA Significance (-log10(FDR))") 
+
+      
+```
+
+### Samples
+
+# PCA Figures
+
+## Overview
+### 2+3
+```{r}
+tmp_layout <- c(area(t = 2, l = 1, b = 6, r = 5),
+                area(t = 1, l = 1, b = 1, r = 5),
+                area(t = 2, l = 6, b = 6, r = 6),
+                area(t = 1, l = 6, b = 1, r = 6))
+tmp_plot <- list()
+```
+
+
+```{r}
+tmp_sigPC <- plottingData_PCA$anova %>%
+  filter(PC %in% c(2,3))
+
+tmp_plot[[1]] <-
+ggplot(plottingData_PCA$plottingData) +
+  geom_point(
+    aes_string(x = paste0("PC", tmp_sigPC$PC[1]),
+               y = paste0("PC", tmp_sigPC$PC[2]),
+               color = "Genotype",
+               fill = "SxG",
+               shape = "Sex"),
+    size = 2
+  ) + 
+  theme_classic() +
+  scale_color_manual(values = qualitative_hcl(8,"Dark 3")[c(2,4)]) +
+  scale_shape_manual(values = c(24,21)) +
+  scale_fill_manual(values = c(qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+                               qualitative_hcl(8,"Dark 3")[2],
+                               qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+                               qualitative_hcl(8,"Dark 3")[4])) +
+  guides(color = guide_legend("Line"),
+         fill = "none",
+         shape = guide_legend("Sex",
+                              override.aes = list(fill = c(alpha("black", 0.15),"black")))) +
+  xlab(expr(paste("PC",
+                  !!(tmp_sigPC$PC[1]),
+                  "(",
+                  !!(round(tmp_sigPC[[1, "var"]]* 100, digits = 2)),
+                  "%), ",
+                  FDR[Sex]~"=",
+                  !!(format(tmp_sigPC[[1, "Sex"]], scientific = T, digits = 2))
+                  ) 
+            )
+       ) +
+  ylab(expr(paste("PC",
+                  !!(tmp_sigPC$PC[2]),
+                  "(",
+                  !!(round(tmp_sigPC[[2, "var"]]* 100, digits = 2)),
+                  "%), ",
+                  FDR[Line]~"=",
+                  !!(format(tmp_sigPC[[2, "Genotype"]], scientific = T, digits = 2))
+                  ) 
+            )
+       )
+
+tmp_plot[[2]] <-
+  ggplot(plottingData_PCA$plottingData) +
+    geom_boxplot(aes(
+      fill = SxG,
+      x = SxG,
+      y = !!sym(paste0("PC", tmp_sigPC$PC[2])),
+    ),
+    width = 0.75) +
+    scale_fill_manual(values = c(qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[2],
+                                 qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[4])) +
+    theme_void() + 
+    guides(fill = "none")
+
+tmp_plot[[2]] <- 
+ggplot() +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(Genotype == "HP"),
+               aes(x = "HP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[2]))),
+               width = 0.75,
+               fill = qualitative_hcl(8,"Dark 3")[2],
+               outlier.color = qualitative_hcl(8,"Dark 3")[2]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(Genotype == "LP"),
+               aes(x = "LP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[2]))),
+               width = 0.75,
+               fill = qualitative_hcl(8,"Dark 3")[4],
+               outlier.color = qualitative_hcl(8,"Dark 3")[4]) +
+  theme_void() + 
+  guides(fill = "none") +
+  theme(axis.text.x = element_text(size = 12)) +
+  scale_x_discrete(position = "bottom")
+
+tmp_plot[[3]] <-
+  ggplot(plottingData_PCA$plottingData) +
+    geom_boxplot(aes(
+      fill = SxG,
+      x = SxG,
+      y = !!sym(paste0("PC", tmp_sigPC$PC[1])),
+    ),
+    width = 0.75) +
+    scale_fill_manual(values = c(qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[2],
+                                 qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[4])) +
+    theme_void() + 
+    guides(fill = "none") +
+    coord_flip()
+
+tmp_plot[[3]] <-
+ggplot(plottingData_PCA$plottingData) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(Sex == "M"),
+               aes(
+                 x = Sex,
+                 y = !!sym(paste0("PC", tmp_sigPC$PC[1]))
+               ),
+               width = 0.75,
+               notch = F,
+               fill = "black",
+               outlier.shape = 21) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(Sex == "F"),
+               aes(
+                 x = Sex,
+                 y = !!sym(paste0("PC", tmp_sigPC$PC[1]))
+               ),
+               width = 0.75,
+               notch = F,
+               fill = alpha("black", 0.15),
+               outlier.shape = 24) +
+  theme_void() + 
+  guides(fill = "none") +
+  coord_flip() +
+  theme(axis.text.y = element_text(size = 12)) +
+  scale_x_discrete(position = "bottom")
+
+
+tmp_plot[[3]]
+
+tmp_plot[[4]] <-
+(wrap_plots(tmp_plot[[1]] +
+             theme(axis.text = element_blank(),
+                   axis.title = element_text(size = 15),
+                   legend.position = "bottom"),
+           tmp_plot[[3]],
+           tmp_plot[[2]],
+           guide_area()) +
+  plot_layout(design = tmp_layout)) %>%
+  wrap_elements
+tmp_plot[[4]]
+
+```
+
+### 4+5
+```{r}
+tmp_sigPC <- plottingData_PCA$anova %>%
+  filter(PC %in% c(4,5))
+
+tmp_plot[[1]] <-
+ggplot(plottingData_PCA$plottingData) +
+  geom_point(
+    aes_string(x = paste0("PC", tmp_sigPC$PC[1]),
+               y = paste0("PC", tmp_sigPC$PC[2]),
+               color = "Genotype",
+               fill = "SxG",
+               shape = "Sex",
+               size = "Sex")
+  ) + 
+  theme_classic() +
+  scale_size_manual(values = c(2, 2)) +
+  scale_color_manual(values = qualitative_hcl(8,"Dark 3")[c(2,4)]) +
+  scale_shape_manual(values = c(24,21)) +
+  scale_fill_manual(values = c(qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+                               qualitative_hcl(8,"Dark 3")[2],
+                               qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+                               qualitative_hcl(8,"Dark 3")[4])) +
+  guides(color = guide_legend("Line"),
+         fill = "none",
+         shape = guide_legend("Sex",
+                              override.aes = list(fill = c(alpha("black", 0.15),"black")))) +
+  xlab(expr(paste("PC",
+                  !!(tmp_sigPC$PC[1]),
+                  "(",
+                  !!(round(tmp_sigPC[[1, "var"]]* 100, digits = 2)),
+                  "%), ",
+                  FDR[Sex.Line]~"=",
+                  !!(format(tmp_sigPC[[1, "SxG"]], scientific = T, digits = 2))
+                  ) 
+            )
+       ) +
+  ylab(expr(paste("PC",
+                  !!(tmp_sigPC$PC[2]),
+                  "(",
+                  !!(round(tmp_sigPC[[2, "var"]]* 100, digits = 2)),
+                  "%), ",
+                  FDR[Sex.Line]~"=",
+                  !!(format(tmp_sigPC[[2, "SxG"]], scientific = T, digits = 2))
+                  ) 
+            )
+       )
+  
+
+tmp_plot[[2]] <-
+  ggplot(plottingData_PCA$plottingData) +
+    geom_boxplot(aes(
+      fill = SxG,
+      x = SxG,
+      y = !!sym(paste0("PC", tmp_sigPC$PC[2])),
+    ),
+    width = 0.75,
+    notch = F) +
+    scale_fill_manual(values = c(qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[2],
+                                 qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[4])) +
+    theme_void() + 
+    guides(fill = "none")
+
+
+tmp_plot[[2]] <-
+ggplot() +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "FxHP"),
+               aes(x = "FxHP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[2]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+               outlier.shape = 24,
+               outlier.color = qualitative_hcl(8,"Dark 3")[2]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "MxHP"),
+               aes(x = "MxHP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[2]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[2],
+               outlier.color = qualitative_hcl(8,"Dark 3")[2]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "FxLP"),
+               aes(x = "FxLP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[2]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+               outlier.shape = 24,
+               outlier.color = qualitative_hcl(8,"Dark 3")[4]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "MxLP"),
+               aes(x = "MxLP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[2]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[4],
+               outlier.color = qualitative_hcl(8,"Dark 3")[4]) +
+  theme_void() + 
+  guides(fill = "none")
+
+tmp_plot[[3]] <-
+  ggplot(plottingData_PCA$plottingData) +
+    geom_boxplot(aes(
+      fill = SxG,
+      x = SxG,
+      y = !!sym(paste0("PC", tmp_sigPC$PC[1])),
+    ),
+    width = 0.75,
+    notch = F) +
+    scale_fill_manual(values = c(qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[2],
+                                 qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+                                 qualitative_hcl(8,"Dark 3")[4])) +
+    theme_void() + 
+    guides(fill = "none") +
+    coord_flip()
+
+tmp_plot[[3]] <-
+ggplot() +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "FxHP"),
+               aes(x = "FxHP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[1]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[2] %>% alpha(alpha = 0.15),
+               outlier.shape = 24,
+               outlier.color = qualitative_hcl(8,"Dark 3")[2]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "MxHP"),
+               aes(x = "MxHP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[1]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[2],
+               outlier.color = qualitative_hcl(8,"Dark 3")[2]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "FxLP"),
+               aes(x = "FxLP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[1]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[4] %>% alpha(alpha = 0.15),
+               outlier.shape = 24,
+               outlier.color = qualitative_hcl(8,"Dark 3")[4]) +
+  geom_boxplot(data = plottingData_PCA$plottingData %>%
+                 filter(SxG == "MxLP"),
+               aes(x = "MxLP",
+                   y = !!sym(paste0("PC", tmp_sigPC$PC[1]))),
+               width = 0.75,
+               color = "black",
+               fill = qualitative_hcl(8,"Dark 3")[4],
+               outlier.color = qualitative_hcl(8,"Dark 3")[4]) +
+  theme_void() + 
+  guides(fill = "none") +
+  coord_flip()
+
+
+tmp_plot[[5]] <-
+(wrap_plots(tmp_plot[[1]] +
+             theme(axis.text = element_blank(),
+                   axis.title = element_text(size = 15),
+                   legend.position = "bottom"),
+           tmp_plot[[3]],
+           tmp_plot[[2]],
+           guide_area()) +
+  plot_layout(design = tmp_layout)) %>%
+  wrap_elements
+tmp_plot[[5]]
+```
+
+### Combined
+```{r}
+wrap_plots(tmp_plot[[4]], tmp_plot[[5]],
+           guides = "collect") + plot_annotation(tag_levels = "A")
+```
+
+
+
+## Scores by factor
+These are heavily based on what i have in the PCA_Plotting_Functions
+### Line
+```{r}
+tmp_factor <- "Genotype"
+tmp <- which(plottingData_PCA$anova[, tmp_factor] < 0.05)
+
+tmpPlot_line <- grouped_ggbetweenstats(
+  data = plottingData_PCA$plottingData_long %>%
+     filter(PC %in% tmp, var > 0.01) %>%
+     mutate(p_value = plottingData_PCA$anova[as.numeric(PC), tmp_factor][[1]],
+            x = str_c(x, "\nq = ", format(p_value, digits = 2))) %>%
+  arrange(PC) %>% 
+  mutate(x = factor(x, levels = unique(x))) ,
+  x = {{tmp_factor}},
+  y = Score,
+  ylab = "Score (arb)",
+  xlab = "Line",
+  grouping.var = x,
+  plotgrid.args = list(nrow = 1),
+  annotation.args = list(
+    tag_levels = 'A'
+  ),
+  outlier.tagging = TRUE,
+  outlier.label = joinKey,
+  outlier.label.args = list(color = "red"),
+  outlier.coef = 2.2,
+  pairwise.comparisons = F,
+  p.adjust.method = "fdr",
+  results.subtitle =F,
+  centrality.plotting = T,
+  centrality.type = "nonparametric",
+  centrality.label.args = list(max.overlaps = 0),
+  #plot.type = "violin",
+  ggplot.component = list(
+    scale_color_manual(values = hcl.colors(n = 4, "Dark 2")[c(2,4)]),
+    scale_fill_manual(values = hcl.colors(n = 4, "Dark 2")[c(2,4)]),
+    theme(#axis.text.x = element_text(angle = 45),
+          axis.text.y = element_blank(),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 15))
+  ),
+  ggtheme = theme_classic()) 
+
+tmpPlot_line
+
+```
+### Sex
+```{r}
+tmp_factor <- "Sex"
+tmp <- which(plottingData_PCA$anova[, tmp_factor] < 0.05)
+
+
+tmpPlot_sex <- grouped_ggbetweenstats(
+  data = plottingData_PCA$plottingData_long %>%
+     filter(PC %in% tmp, var > 0.01) %>%
+     mutate(p_value = plottingData_PCA$anova[as.numeric(PC), tmp_factor][[1]],
+            x = str_c(x, "\nq = ", format(p_value, digits = 2))) %>%
+  arrange(PC) %>% 
+  mutate(x = factor(x, levels = unique(x))) ,
+  x = {{tmp_factor}},
+  y = Score,
+  ylab = "Score (arb)",
+  #xlab = "Line",
+  grouping.var = x,
+  plotgrid.args = list(nrow = 1),
+  annotation.args = list(
+    tag_levels = 'A'
+  ),
+  outlier.tagging = TRUE,
+  outlier.label = joinKey,
+  outlier.label.args = list(color = "red"),
+  outlier.coef = 2.2,
+  pairwise.comparisons = F,
+  p.adjust.method = "fdr",
+  results.subtitle =F,
+  centrality.plotting = T,
+  centrality.type = "nonparametric",
+  centrality.label.args = list(max.overlaps = 0),
+  #plot.type = "violin",
+  ggplot.component = list(
+    scale_color_manual(values = hcl.colors(n = 4, "Dark 2")[c(1,3)]),
+    scale_fill_manual(values = hcl.colors(n = 4, "Dark 2")[c(1,3)]),
+    theme(#axis.text.x = element_text(angle = 45),
+          axis.text.y = element_blank(),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 15))
+  ),
+  ggtheme = theme_classic()) 
+
+tmpPlot_sex
+
+```
+
+```{r}
+tmp_factor <- "LibraryPrepBatch"
+tmp <- which(plottingData_PCA$anova[, tmp_factor] < 0.05)
+
+tmpPlot_batch <- grouped_ggbetweenstats(
+  data = plottingData_PCA$plottingData_long %>%
+     filter(PC %in% tmp, var > 0.01) %>%
+     mutate(p_value = plottingData_PCA$anova[as.numeric(PC), tmp_factor][[1]],
+            x = str_c(x, "\nq = ", format(p_value, digits = 2))) %>%
+  arrange(PC) %>% 
+  mutate(x = factor(x, levels = unique(x))) ,
+  x = {{tmp_factor}},
+  y = Score,
+  ylab = "Score (arb)",
+  xlab = "Batch",
+  grouping.var = x,
+  plotgrid.args = list(nrow = 1),
+  annotation.args = list(
+    tag_levels = 'A'
+  ),
+  outlier.tagging = TRUE,
+  outlier.label = joinKey,
+  outlier.label.args = list(color = "red"),
+  outlier.coef = 2.2,
+  pairwise.comparisons = F,
+  p.adjust.method = "fdr",
+  results.subtitle =F,
+  centrality.plotting = T,
+  centrality.type = "nonparametric",
+  centrality.label.args = list(max.overlaps = 0),
+  #plot.type = "violin",
+  ggplot.component = list(
+    scale_color_manual(values = hcl.colors(n = 5, "Dark 2")),
+    scale_fill_manual(values = hcl.colors(n = 5, "Dark 2")),
+    theme(#axis.text.x = element_text(angle = 45),
+          axis.text.y = element_blank(),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 15))
+  ),
+  ggtheme = theme_classic())  
+  #geom_signif(comparisons = list(c("HP","LP")),
+  #             map_signif_level = function(p) sprintf("p = %.2g", p)
+  #           )
+
+tmpPlot_batch 
+```
+```{r}
+tmp_factor <- "SxG"
+tmp <- which(plottingData_PCA$anova[, tmp_factor] < 0.05)
+
+tmpPlot_SxG <- grouped_ggbetweenstats(
+  data = plottingData_PCA$plottingData_long %>%
+     filter(PC %in% tmp, var > 0.01) %>%
+     mutate(p_value = plottingData_PCA$anova[as.numeric(PC), tmp_factor][[1]],
+            x = str_c(x, "\nq = ", format(p_value, digits = 2))) %>%
+  arrange(PC) %>% 
+  mutate(x = factor(x, levels = unique(x))) ,
+  x = {{tmp_factor}},
+  y = Score,
+  ylab = "Score (arb)",
+  xlab = "Sex X Line",
+  grouping.var = x,
+  plotgrid.args = list(nrow = 1),
+  annotation.args = list(
+    tag_levels = 'A'
+  ),
+  outlier.tagging = TRUE,
+  outlier.label = joinKey,
+  outlier.label.args = list(color = "red"),
+  outlier.coef = 2.2,
+  pairwise.comparisons = F,
+  p.adjust.method = "fdr",
+  results.subtitle =F,
+  centrality.plotting = T,
+  centrality.type = "nonparametric",
+  centrality.label.args = list(max.overlaps = 0),
+  #plot.type = "violin",
+  ggplot.component = list(
+    scale_color_manual(values = hcl.colors(n = 4, "Dark 2")),
+    scale_fill_manual(values = hcl.colors(n = 4, "Dark 2")),
+    theme(#axis.text.x = element_text(angle = 45),
+          axis.text.y = element_blank(),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 15))
+  ),
+  ggtheme = theme_classic())  
+  #geom_signif(comparisons = list(c("HP","LP")),
+  #             map_signif_level = function(p) sprintf("p = %.2g", p)
+  #           )
+
+tmpPlot_SxG
+```
+
+```{r}
+wrap_plots(
+  tmpPlot_sex[[1]], plot_spacer(), tmpPlot_sex[[2]], tmpPlot_sex[[3]], tmpPlot_sex[[4]], plot_spacer(),
+  plot_spacer(), tmpPlot_line[[1]], tmpPlot_line[[2]], tmpPlot_line[[3]], plot_spacer(), plot_spacer(),
+  tmpPlot_SxG[[1]], tmpPlot_SxG[[2]], tmpPlot_SxG[[3]], tmpPlot_SxG[[4]], tmpPlot_SxG[[5]], tmpPlot_SxG[[6]],
+  nrow = 3
+) + plot_annotation(tag_levels = c('A', 'i'))
+```
+
+
+```{r}
+wrap_plots(
+  tmpPlot_sex[[1]], tmpPlot_line[[1]],
+  tmpPlot_SxG[[3]], tmpPlot_SxG[[4]],
+  tmpPlot_batch[[2]], tmpPlot_batch[[3]],
+  tmpPlot_SxG[[6]],
+  ncol = 3) + plot_annotation(tag_levels = list('A'))
+```
+
+
+#Paper figures
+
+## 2
+
+### DG counts
+```{r}
+fig2_A <- bind_rows(
+  diffResults %>%
+    filter(is.DE == 1) %>%
+    mutate(dir = ifelse(logFC.DE < 0, "Down", "Up")) %>% 
+    count(dir) %>%
+    mutate(Comp = "DE"),
+  diffResults %>%
+    filter(is.DV == 1) %>%
+    mutate(dir = ifelse(logFC.DV < 0, "Down", "Up")) %>% 
+    count(dir) %>%
+    mutate(Comp = "DV"),
+  diffResults %>%
+    filter(is.DW == 1) %>%
+    mutate(dir = ifelse(logFC.DW < 0, "Down", "Up")) %>% 
+    count(dir) %>%
+    mutate(Comp = "DW")
+) %>%
+  pivot_wider(names_from=dir,
+              values_from=n) %>%
+  mutate(Comp = paste0(Comp,"\nn = ",Down+Up)) %>%
+ ggplot() +
+  geom_col(aes(
+    x = factor(Comp),
+    y = Up,
+    fill = "Up")) +
+  geom_col(aes(
+    x = factor(Comp),
+    y = -Down,
+    fill = "Down")) +
+  geom_text(aes(
+    size = 12,
+    x = factor(Comp),
+    y = -Down,
+    label = Down,
+    vjust = 1
+  )) +
+  geom_text(aes(
+    size = 12,
+    x = factor(Comp),
+    y = Up,
+    label = Up,
+    vjust = -0.25
+  )) +
+  scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(1,5)],
+                    limits = c("Up", "Down")) +
+  theme_classic() +
+  theme(axis.text = element_text(size = 15), 
+        axis.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.title = element_blank(),
+        legend.position = "right") +
+  guides(size = "none") +
+      scale_y_continuous(labels = function(x) abs(x))
+
+fig2_A
+
+```
+
+### DV
+```{r}
+#Gpd1
+#N4bp2l1
+#Pnmal2
+#Usp11
+#Usp27x
+#Cfap54
+#Gabra2
+#Sema6d
+#Erg2
+#Glra3
+#
+tmp_gene <- "Gabra2"
+tmp <- DV %>%
+  filter(external_gene_name == tmp_gene) %>%
+  pull(ensembl_gene_id)
+
+tmp <- voomNormalized_all[tmp, ] %>% t %>% as.data.frame()
+colnames(tmp) <- "gene"
+tmp <- tmp %>%
+  rownames_to_column("SampleID") %>%
+  left_join(phenotypeSelected)
+
+
+fig2_B <- ggbetweenstats(
+  tmp,
+  y = gene,
+  x = Genotype,
+  p.adjust.method = "fdr",
+  xlab = "Preference Line",
+  ylab = "Normalized Expression",
+  title = paste0("Differential Variance: ", tmp_gene, " [FDR = 3.3e-5]"),
+  #subtitle = "Differentially expressed, cis-eQTL gene",
+  results.subtitle = F,
+  centrality.plotting = F,
+  ggtheme = ggplot2::theme_classic(),
+) + theme(#axis.text.x = element_text(angle = 45),
+          axis.text = element_text(size = 12),
+          axis.title = element_text(size = 15))
+
+fig2_B
+```
+
+### DW
+
+```{r}
+tmp_gene <- c("Ephb6")
+
+tmp_Genes <- DW %>% 
+  filter(external_gene_name %in% tmp_gene) %>%
+  pull(genes) %>%
+  str_split(pattern = ", ") %>% unlist
+tmp_Genes <- c(tmp_gene, tmp_Genes)
+
+tmp_Genes <- DW %>%
+  filter(external_gene_name %in% tmp_Genes)
+
+tmp_corA <- cor(t(voomNormalized_all[tmp_Genes$ensembl_gene_id, phenotypeSelected$Genotype == "HP"]))
+tmp_corB <- cor(t(voomNormalized_all[tmp_Genes$ensembl_gene_id, phenotypeSelected$Genotype == "LP"]))
+
+tmp_cor = abs(tmp_corA) - abs(tmp_corB)
+
+
+colnames(tmp_cor) <- tmp_Genes$external_gene_name
+rownames(tmp_cor) <- tmp_Genes$external_gene_name
+
+#We want to highlight genes that are also DW, and in the greenyellow high module
+tmp_Genes <- DW %>%
+  filter(external_gene_name %in% rownames(tmp_cor),
+         external_gene_name %in% (modules[["high"]] %>%
+                                     filter(module == "greenyellow") %>%
+                                     pull(external_gene_name)),
+         is.DW == 1) %>%
+  pull(external_gene_name)
+
+tmp_Genes <- c(rownames(tmp_cor)[1], tmp_Genes)
+
+#or do just want to highlight differential edges
+tmp_Genes <- rowSums(abs(tmp_cor) > 0.5) %>% sort(decreasing = T)
+tmp_Genes <- names(tmp_Genes)[1:min(20,length(tmp_Genes))]
+
+fig2_C <-
+  Heatmap(tmp_cor[tmp_Genes, tmp_Genes],
+        col = colorRamp2(c(-1,0),   hcl_palette ="RdYlBu", reverse = F),
+        cluster_rows = T,
+        cluster_columns = T,
+        show_row_dend = T,
+        show_column_dend = F,
+        row_split = 3,
+        column_split = 3,
+        row_title = NULL,
+        column_title = paste0("Differential Wiring: ", paste(tmp_gene, collapse=",")),
+        heatmap_legend_param = list(title = "Differential Correlation",
+                                    direction = "horizontal",
+                                    at = c(-1,-0.5,0),
+                                    position = "bottom"),
+        column_names_rot = 45)
+fig2_C
+```
+
+```{r}
+rownames(tmp_corA) <- tmp_Genes$external_gene_name
+mean(abs(tmp_corA[1,2:nrow(tmp_corA)]))
+sum(abs(tmp_corA[1,2:nrow(tmp_corA)]))
+
+rownames(tmp_corB) <- tmp_Genes$external_gene_name
+mean(abs(tmp_corB[1,2:nrow(tmp_corB)]))
+```
+
+
+### GO
+```{r}
+goInfo <- setupGO()
+
+tmp_GO <- list(
+  DE = differential_GO[["DE"]] %>%
+    mutate(from = "DE"),
+  DV = differential_GO[["DV"]] %>%
+    mutate(from = "DV"),
+  DW = differential_GO[["DW"]] %>%
+    mutate(from = "DW")
+)
+
+tmp_GO <- map(tmp_GO,
+              function(x) {
+                x <- x %>%
+                  rowwise() %>%
+                  mutate(geneID = list(unique(str_split(geneID, pattern = ", ")[[1]]))) %>%
+                  ungroup()
+                if (nrow(x) > 1) {
+                  #Step 2: compute self-similarity matrix using jaccard similiarity
+                  tmp_geneIDs <- x$geneID
+                  tmp_semsim <- matrix(NA, length(tmp_geneIDs), length(tmp_geneIDs))
+                  
+                  for (i in 1:length(tmp_geneIDs)) {
+                    for(j in i:length(tmp_geneIDs)) {
+                      tmp_semsim [j,i] <- length(intersect(tmp_geneIDs[[i]],
+                                                           tmp_geneIDs[[j]]))
+                      tmp_semsim [j,i] <- tmp_semsim [j,i] / length(union(tmp_geneIDs[[i]],
+                                                                          tmp_geneIDs[[j]]))
+                    }
+                  }
+                }
+                tmp_semsim[upper.tri(tmp_semsim)] <- t(tmp_semsim)[upper.tri(tmp_semsim)]
+                x$semsim <- (rowSums(tmp_semsim)-1)
+                return(x)
+              })
+
+tmp_GO <- bind_rows(tmp_GO)
+
+tmp_GO <- tmp_GO %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(from) %>%    
+    slice_max(qvalue, n = 9) %>% 
+    ungroup() %>% rowwise() %>%
+    mutate(Description =  str_trunc(Description, 55, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>% group_by(from)
+  
+tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_min(semsim, n = 3) %>% 
+    slice_max(GeneRatio, n = 3) %>%
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_min(semsim, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+fig2_D <- tmp_GO %>%
+    ungroup() %>%
+    arrange(from, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(from),
+             fill = factor(from))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 linewidth = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Geneset",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(1,4,5)],
+                       limits=c("DE","DV","DW")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(1,4,5)],
+                      limits=c("DE","DV","DW")) +
+    scale_size_continuous(range = c(2.5, 6))
+fig2_D
+
+```
+###Combine
+```{r}
+
+wrap_plots(fig2_A,
+           fig2_B,
+           grid.grabExpr(draw(fig2_C,heatmap_legend_side = "bottom")),
+           fig2_D) + plot_annotation(tag_levels = "A")
+
+#ggsave("test.pdf",
+#        width=12,
+#        height=12,
+#        units="in")
+
+
+```
+
+
+## 3
+```{r}
+library(WGCNA)
+library(ggplotify)
+fig_3 <- list()
+```
+
+### Trees
+```{r}
+sum(tree[["high"]]$height < 0.6)
+tmp_high <- tree[["high"]]
+tmp_high$height[tmp_high$height < 0.6] <- 0.99
+
+png("test_A.png",
+    width = 7,
+    height = 4.5,
+    units = "in",
+    res = 300)
+
+plotDendroAndColors(tmp_high, modules[["high"]][,"module_orig"],
+                    "",
+                    main = "High Preference",
+                    ylab = "1 - TOM",
+                    sub = "",
+                    xlab = "",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = F, guideHang = 0.05)
+dev.off()
+
+# fig3_A <- as.ggplot(~plotDendroAndColors(tmp_high, modules[["high"]][,"module"],
+#                     "",
+#                     main = "High Preference",
+#                     ylab = "1 - TOM",
+#                     sub = "",
+#                     xlab = "",
+#                     dendroLabels = FALSE, hang = 0.03,
+#                     addGuide = F, guideHang = 0.05))
+
+sum(tree[["low"]]$height < 0.6)
+tmp_low <- tree[["low"]]
+tmp_low$height[tmp_low$height < 0.6] <-0.99
+
+png("test_B.png",
+    width = 7,
+    height = 4.5,
+    units = "in",
+    res = 300)
+
+plotDendroAndColors(tmp_low, modules[["low"]][,"module_orig"],
+                    "",
+                    main = "Low Preference",
+                    ylab = "1 - TOM",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = F, guideHang = 0.05)
+dev.off()
+# fig3_B <- as.ggplot(~plotDendroAndColors(tmp_low, modules[["low"]][,"module"],
+#                     "",
+#                     main = "Low Preference",
+#                     ylab = "1 - TOM",
+#                     sub = "",
+#                     xlab = "",
+#                     dendroLabels = FALSE, hang = 0.03,
+#                     addGuide = F, guideHang = 0.05))
+# 
+# 
+# test3 <- wrap_plots(fig3_A, fig3_B) + plot_annotation(tag_levels = "A")
+```
+
+
+### Preservation
+```{r}
+tmp_i <- split(hubs[["high"]]$ensembl_gene_id, hubs[["high"]]$module)
+tmp_j <- split(hubs[["low"]]$ensembl_gene_id, hubs[["low"]]$module)
+
+tmp_overlap <- matrix(double(), length(tmp_i), length(tmp_j))
+
+for(i in 1:length(tmp_i)) {
+  for(j in 1:length(tmp_j)) {
+    tmp_overlap[i,j] = length(intersect(tmp_i[[i]], tmp_j[[j]])) / 
+      length(union(tmp_i[[i]], tmp_j[[j]]))
+  }
+}
+
+#Rows = high, columns = low
+rownames(tmp_overlap) <- names(tmp_i)
+colnames(tmp_overlap) <- names(tmp_j)
+
+tmp_overlap_hub <- tmp_overlap           
+rm(tmp_overlap)
+```
+
+### Rename hubGO
+
+```{r}
+#we need to rename the hubs stuff..
+tmp_rename_HP <- modules[["high"]] %>%
+  select(module, module_orig) %>%
+  distinct()
+
+#Now grey is HP_19
+names(hubs_GO[["high"]]) <- tmp_rename_HP$module[match(names(hubs_GO[["high"]]), tmp_rename_HP$module_orig)]
+
+tmp_rename_LP <- modules[["low"]] %>%
+  select(module, module_orig) %>%
+  distinct()
+
+#Now grey is LP_S
+names(hubs_GO[["low"]]) <- tmp_rename_LP$module[match(names(hubs_GO[["low"]]), tmp_rename_LP$module_orig)]
+```
+
+### High HM
+
+```{r}
+##Combine old with new, drop the old cell info
+tmp_HM <- modules_summary[["high"]] %>%
+  select(module,
+         high,
+         DE, DE_down, DE_up,
+         DV, DV_down, DV_up,
+         DW, DW_down, DW_up,
+         B6, PWK, L1000,
+         #p.sex, p.geontype,
+         "Olig", "Microglia", "Astrocyte",
+         "OPC",
+         gaba, glut,
+         starts_with("GABA"),
+         starts_with("Glut")
+         ) %>% ungroup %>%
+  mutate(across(where(is.numeric), function(x) p.adjust(x, method="fdr")))
+
+#Only hubs_GO
+##Only keep modules that have a significant enrichment related to selection and some GO terms
+
+#We have to rename the go modules...
+
+tmp_HM <- tmp_HM %>%
+  left_join(sapply(hubs_GO[["high"]], function(x) nrow(x) > 0) %>%
+              enframe(name = "module", value = "keep")) %>%
+  filter(keep == T,
+         module != "HP_19") %>%
+  ungroup %>%
+  rowwise %>%
+  filter(any(c_across(where(is.numeric)) < 0.05)) %>% 
+  mutate(hub = (high < 0.05),
+         diff = any(c_across(cols = c(DE, DE_up, DE_down,
+                                      DV, DV_up, DV_down,
+                                      DW, DW_up, DW_down)) < 0.05)) %>%
+  #select(module, where(function(x) any(x<0.05)))%>%
+  ungroup %>%
+  mutate(across(where(is.numeric), function(x) -log10(x))) %>%
+  mutate(across(where(is.numeric), function(x) {
+    x[x>5] <- 5
+    #x[x< -log10(0.05)] <- 0
+    return(x)}
+  )) %>% ungroup()
+
+tmp_HM <- tmp_HM %>%
+  rowwise() %>%
+  mutate(row_split = case_when(
+    all(c_across(c(hub, diff))) ~ 1,
+    hub ~ 2,
+    diff ~ 3)) %>%
+  ungroup()
+
+tmp_HM <- tmp_HM %>% 
+  filter(!is.na(row_split)) %>%
+  mutate(Unique_hubs = high) %>%
+  select(-high, -DE, -DW, -DV) %>%
+  mutate(row_split = factor(row_split, levels = c(1,2,3),
+                            labels = c("Both","Hubs","Diff")))
+
+tmp_HM <- left_join(
+  tmp_HM,
+  (tmp_overlap_hub %>% 
+  as.data.frame %>%
+  rownames_to_column(var = "module") %>%
+  rowwise() %>% 
+  mutate(Hubs = max(c_across(where(is.numeric)))) %>%
+  ungroup() %>%
+  select(module,Hubs))
+) 
+
+
+#Only consider sub-type enrichment in modules which are enriched in overall gaba markers.
+#If a module is enriched in 'negative markers' for a subtype, also get rid of that to help us 
+#focus on specificity
+for(i in formatC(1:18,format = "d", flag = "0", digits = 1)) {
+  
+  tmp_null <- tmp_HM[,paste0("Gaba_", i, "_NO")] > -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Gaba_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Gaba_", i, "_EXC")] <- 0
+  }
+  
+  tmp_null <- tmp_HM[,paste0("gaba")] < -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Gaba_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Gaba_", i, "_EXC")] <- 0
+  }
+  
+  
+}
+
+for(i in formatC(1:10, format = "d", flag = "0", digits = 1)) {
+  tmp_null <- tmp_HM[,paste0("Glut_", i, "_NO")] > -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Glut_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Glut_", i, "_EXC")] <- 0
+  }
+  
+  tmp_null <- tmp_HM[,paste0("glut")] < -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Glut_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Glut_", i, "_EXC")] <- 0
+}
+}
+```
+
+```{r}
+tmp_HM_2 <- tmp_HM %>%
+  select(DE_down, DE_up,
+         DV_down, DV_up,
+         DW_down, DW_up,
+         Unique_hubs, Hubs,
+         B6, PWK,
+         "Olig", "Microglia", "Astrocyte",
+         "OPC",
+         gaba, glut,
+         all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1),"")),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1),""))
+         # all_of(paste0("Gaba_", formatC(1:18,
+         #                               format = "d", flag = "0", digits = 1),"_EXC")),
+         # all_of(paste0("Glut_", formatC(1:10,
+         #                               format = "d", flag = "0", digits = 1),"_EXC"))
+         ) %>% as.matrix
+
+tmp <- Heatmap(tmp_HM_2,
+        cluster_columns = F,
+        cluster_rows = F,
+        row_split = tmp_HM$row_split,
+        column_split = factor(c("DE","DE",
+                                "DV","DV",
+                                "DW","DW",
+                                "Hubs", "Hubs",
+                                "HSCC", "HSCC",
+                                rep("Non-Neuronal", 4),
+                                rep("Neuronal",2),
+                                rep("Inhibitory sub-type", 18),
+                                rep("Excitatory sub-type", 10)),
+                              levels = c("DE","DV","DW", "Hubs", "HSCC", "Non-Neuronal",
+                                         "Neuronal", "Inhibitory sub-type", "Excitatory sub-type")),
+        show_row_dend = F,
+        column_gap = unit(2,"mm"),
+        column_labels = c(rep(c("Down", "Up"),3),
+                          "Unique", "Preservation",
+                          "B6", "PWK",
+                          "Oligo","Microglia","Astroctye","OPC",
+                          "Inhibitory","Excitatory",
+                          1:18,
+                          1:10
+                          ),
+        col = colorRamp2(c(0, 1.3,
+                           2.225, 3.15, 4.075, 5), c("black", "white",
+                                                    "#00B785","#53CC67","#B2DC3C","#FDE333")),
+        cell_fun = function(j, i, x, y, w, h, fill) {
+          v <- pindex(tmp_HM_2,i,j)
+          
+          if(j == 8) {
+          col <- colorRamp2(c(0, 0.45,
+                              0.5875, 0.7250, 0.8625, 1.0000), c("black", "white",
+                                                                 "#001889", "#5F008C", "#91008D", "#B62485"))(v)
+          grid.rect(x, y, w, h, gp = gpar(fill = col, col = col))
+          
+          if(v >= 0.45)
+              grid.text("*", x, y-h/5, gp = gpar(fontsize = 20, col = "red"))
+          
+          } else {
+            if(v > -log10(0.05))
+              grid.text("*", x, y-h/4, gp = gpar(fontsize = 20, col = "red"))
+          }
+        },
+        show_heatmap_legend = F,
+        row_labels = tmp_HM$module,
+        column_names_rot = 45)
+
+
+lgd = Legend(title = "-log10(FDR)",
+              direction = "horizontal",
+       col_fun = colorRamp2(c(0, 1.3,
+                                     2.225, 3.15, 4.075, 5), c("black", "white",
+                                                    "#00B785","#53CC67","#B2DC3C","#FDE333")),
+       at = c(0,1.3,3,5))
+
+lgd2 = Legend(title = "Max Jaccard\nSimilarity",
+               direction = "horizontal",
+       col_fun = colorRamp2(c(0, 0.45,
+                              0.5875, 0.7250, 0.8625, 1.0000), c("black", "white",
+                                                                 "#001889", "#5F008C", "#91008D", "#B62485")),
+       at = c(0,.45,1))
+
+fig3_C <- wrap_elements(grid.grabExpr(draw(tmp,
+                                           heatmap_legend_list = list(lgd,lgd2),
+                                           heatmap_legend_side = "right",
+                                           newpage = FALSE)))
+
+fig3_C + 
+  plot_annotation(title = "High-Preference WGCNA Module Enrichment",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+
+```
+
+###Low HM
+```{r}
+tmp_HM <- modules_summary[["low"]] %>%
+  select(module,
+         low,
+         DE, DE_down, DE_up,
+         DV, DV_down, DV_up,
+         DW, DW_down, DW_up,
+         B6, PWK, L1000,
+         #p.sex, p.geontype,
+         "Olig", "Microglia", "Astrocyte",
+         "OPC", 
+         gaba, glut,
+         starts_with("GABA"),
+         starts_with("Glut")
+         ) %>% ungroup %>%
+  mutate(across(where(is.numeric), function(x) p.adjust(x, method="fdr")))
+
+#Only keep modules that have a significant enrichment related to selection and some GO terms
+#JQA 5/13/24 - I added in the logic for GO enrichment counting from the HP version above,
+#which worked, while this one did not.
+tmp_HM <- tmp_HM %>%
+    left_join(sapply(hubs_GO[["low"]], function(x) nrow(x) > 0) %>%
+              enframe(name = "module", value = "keep")) %>%
+  filter(keep == T,
+         module != "LP_S") %>%
+  ungroup %>%
+  rowwise %>%
+  filter(any(c_across(where(is.numeric)) < 0.05)) %>% 
+  mutate(hub = (low < 0.05),
+         diff = any(c_across(cols = c(DE, DE_up, DE_down,
+                                      DV, DV_up, DV_down,
+                                      DW, DW_up, DW_down)) < 0.05)) %>%
+  ungroup %>%
+  mutate(across(where(is.numeric), function(x) -log10(x))) %>%
+  mutate(across(where(is.numeric), function(x) {
+    x[x>5] <- 5
+    #x[x< -log10(0.05)] <- 0
+    return(x)}
+    ))
+
+tmp_HM <- tmp_HM %>%
+  rowwise() %>%
+  mutate(row_split = case_when(
+    all(c_across(c(hub, diff))) ~ 1,
+    hub ~ 2,
+    diff ~ 3)) %>%
+  ungroup()
+
+tmp_HM <- tmp_HM %>% 
+  filter(!is.na(row_split)) %>%
+  mutate(Unique_hubs = low) %>%
+  select(-low, -DE, -DW, -DV) %>%
+  mutate(row_split = factor(row_split,
+                            levels = 1:3,
+                            labels = c("Both","Hubs","Diff"))) 
+
+tmp_HM <- left_join(
+  tmp_HM,
+  (tmp_overlap_hub %>% t %>%
+  as.data.frame %>%
+  rownames_to_column(var = "module") %>%
+  rowwise() %>% 
+  mutate(Hubs = max(c_across(where(is.numeric)))) %>%
+  ungroup() %>%
+  select(module,Hubs))
+) 
+
+
+for(i in formatC(1:18,format = "d", flag = "0", digits = 1)) {
+  
+  tmp_null <- tmp_HM[,paste0("Gaba_", i, "_NO")] > -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Gaba_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Gaba_", i, "_EXC")] <- 0
+  }
+  
+  tmp_null <- tmp_HM[,paste0("gaba")] < -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Gaba_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Gaba_", i, "_EXC")] <- 0
+  }
+  
+  
+}
+
+for(i in formatC(1:10, format = "d", flag = "0", digits = 1)) {
+  tmp_null <- tmp_HM[,paste0("Glut_", i, "_NO")] > -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Glut_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Glut_", i, "_EXC")] <- 0
+  }
+  
+  tmp_null <- tmp_HM[,paste0("glut")] < -log10(0.05)
+  
+  if(sum(tmp_null) > 0) {
+    tmp_HM[tmp_null, paste0("Glut_", i)] <- 0
+    tmp_HM[tmp_null, paste0("Glut_", i, "_EXC")] <- 0
+}
+}
+
+```
+
+```{r}
+tmp_HM_2 <- tmp_HM %>%
+  select(DE_down, DE_up,
+         DV_down, DV_up,
+         DW_down, DW_up,
+         Unique_hubs, Hubs,
+         B6, PWK,
+         "Olig", "Microglia", "Astrocyte",
+         "OPC",
+         gaba, glut,
+         # all_of(paste0("Gaba_", formatC(1:18,
+         #                                format = "d", flag = "0", digits = 1),"_EXC")),
+         # all_of(paste0("Glut_", formatC(1:10,
+         #                                format = "d", flag = "0", digits = 1),"_EXC")),
+        all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1),"")),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1),""))
+         ) %>% as.matrix
+
+tmp <- Heatmap(tmp_HM_2,
+        cluster_columns = F,
+        cluster_rows = F,
+        row_split = tmp_HM$row_split,
+        column_split = factor(c("DE","DE",
+                                "DV","DV",
+                                "DW","DW",
+                                "Hubs", "Hubs",
+                                "HSCC", "HSCC",
+                                rep("Non-Neuronal", 4),
+                                rep("Neuronal",2),
+                                rep("Inhibitory sub-type", 18),
+                                rep("Excitatory sub-type", 10)),
+                              levels = c("DE","DV","DW", "Hubs", "HSCC", "Non-Neuronal",
+                                         "Neuronal", "Inhibitory sub-type", "Excitatory sub-type")),
+        show_row_dend = F,
+        column_gap = unit(2,"mm"),
+        column_labels = c(rep(c("Down", "Up"),3),
+                          "Unique", "Preservation",
+                          "B6", "PWK",
+                          "Oligo","Microglia","Astroctye","OPC",
+                          "Inhibitory","Excitatory",
+                          1:18,
+                          1:10
+                          ),
+        col = colorRamp2(c(0, 1.3,
+                           2.225, 3.15, 4.075, 5), c("black", "white",
+                                                    "#00B785","#53CC67","#B2DC3C","#FDE333")),
+        cell_fun = function(j, i, x, y, w, h, fill) {
+          v <- pindex(tmp_HM_2,i,j)
+          
+          if(j == 8) {
+          col <- colorRamp2(c(0, 0.45,
+                              0.5875, 0.7250, 0.8625, 1.0000), c("black", "white",
+                                                                 "#001889", "#5F008C", "#91008D", "#B62485"))(v)
+          grid.rect(x, y, w, h, gp = gpar(fill = col, col = col))
+          
+          if(v >= 0.45)
+              grid.text("*", x, y-h/5, gp = gpar(fontsize = 20, col = "red"))
+          
+          } else {
+            if(v > -log10(0.05))
+              grid.text("*", x, y-h/4, gp = gpar(fontsize = 20, col = "red"))
+          }
+        },
+        show_heatmap_legend = F,
+        row_labels =tmp_HM$module,
+        column_names_rot = 45)
+
+
+lgd = Legend(title = "-log10(FDR)",
+              direction = "horizontal",
+       col_fun = colorRamp2(c(0, 1.3,
+                                     2.225, 3.15, 4.075, 5), c("black", "white",
+                                                    "#00B785","#53CC67","#B2DC3C","#FDE333")),
+       at = c(0,1.3,3,5))
+
+lgd2 = Legend(title = "Max Jaccard\nSimilarity",
+               direction = "horizontal",
+       col_fun = colorRamp2(c(0, 0.45,
+                              0.5875, 0.7250, 0.8625, 1.0000), c("black", "white",
+                                                                 "#001889", "#5F008C", "#91008D", "#B62485")),
+       at = c(0,.45,1))
+
+
+fig3_D <- wrap_elements(grid.grabExpr(draw(tmp,
+                                           heatmap_legend_list = list(lgd,lgd2),
+                                           heatmap_legend_side = "right",
+                                           newpage = FALSE)))
+
+fig3_D + 
+  plot_annotation(title = "Low-Preference WGCNA Module Enrichment",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+
+```
+### Combine
+```{r}
+# fig3 <- wrap_plots(fig3_A,
+#                    wrap_elements(fig3_C + 
+#                                    plot_annotation(title = "High-Preference WGCNA Module Enrichment",
+#                                                    theme = theme(plot.title = element_text(hjust = 0.5)))),
+#                    fig3_B,
+# 
+#                    wrap_elements(fig3_D + 
+#                                    plot_annotation(title = "Low-Preference WGCNA Module Enrichment",
+#                                                    theme = theme(plot.title = element_text(hjust = 0.5)))),
+#                    design = c("ABB\nCDD")) + plot_annotation(tag_levels = 'A')
+
+fig4<- wrap_plots(
+                   wrap_elements(fig3_C + 
+                                   plot_annotation(title = "High-Preference WGCNA Module Enrichment",
+                                                   theme = theme(plot.title = element_text(hjust = 0.5)))),
+                  
+
+                   wrap_elements(fig3_D + 
+                                   plot_annotation(title = "Low-Preference WGCNA Module Enrichment",
+                                                   theme = theme(plot.title = element_text(hjust = 0.5)))),
+                   ncol = 1) + plot_annotation(tag_levels = list(c("B","D")))
+
+
+fig4
+
+
+ggsave("WGCNA_Heatmaps.png",
+        plot = fig4,
+        width=18,
+        height=12,
+        units="in")
+
+ggsave("WGCNA_Heatmaps.svg",
+        plot = fig4,
+        width=18,
+        height=12,
+        units="in")
+
+```
+
+
+
+
+## 4
+
+### Network
+
+```{r}
+library(igraph)
+library(ggraph)
+library(tidygraph)
+```
+
+
+#### Build Adjacency matrices
+```{r}
+adj <- list()
+adj[["high"]] <- voomNormalized_all[DW$ensembl_gene_id,
+                                    phenotypeSelected %>% filter(Genotype == "HP") %>% pull(SampleID)]
+adj[["high"]] <- adjacency(t(adj[["high"]]),
+                           power = 10,
+                           type = "unsigned")
+
+adj[["low"]] <- voomNormalized_all[DW$ensembl_gene_id,
+                                    phenotypeSelected %>% filter(Genotype == "LP") %>% pull(SampleID)]
+adj[["low"]] <- adjacency(t(adj[["low"]]),
+                          power = 10,
+                          type = "unsigned")  
+
+```
+
+
+
+### High - Greenyellow (GABA) Hp-14
+```{r}
+tmp_module <- "HP_14"
+
+tmp_hubGenes <- hubs[["high"]] %>%
+  filter(module == tmp_module) %>%
+  select(ensembl_gene_id, external_gene_name, kTotal, kWithin) %>%
+  left_join(diffResults %>% select(-dplyr::starts_with(c("p","log"))))
+
+tmp_hubGenes <- tmp_hubGenes %>%
+  mutate(DE = is.DE+is.DV+is.DW)
+
+tmp_adj <- adj[["high"]][tmp_hubGenes$ensembl_gene_id, tmp_hubGenes$ensembl_gene_id]
+
+diag(tmp_adj) <- 0
+
+rownames(tmp_adj) <- tmp_hubGenes$external_gene_name
+colnames(tmp_adj) <- tmp_hubGenes$external_gene_name
+
+#Take either 50% of connectivity, or limit to 50 genes
+tmp_size = tmp_hubGenes$kWithin
+tmp_drop <- tmp_size
+
+tmp_quant <- max(0.5, (1-25/length(tmp_drop)))
+tmp_drop <- tmp_drop > quantile(tmp_drop, probs = tmp_quant, type = 8)
+
+tmp_size <- tmp_size[tmp_drop]
+tmp_size = tmp_size - min(tmp_size) 
+tmp_size <- (tmp_size + max(tmp_size))
+tmp_size <- tmp_size/ max(tmp_size)
+
+tmp_adj_max <- tmp_adj[tmp_drop, tmp_drop]
+tmp_adj_max <- tmp_adj_max / max(tmp_adj_max)
+
+tmp_size_max <- tmp_size
+tmp_graph_max <- graph_from_adjacency_matrix(
+  tmp_adj_max,
+  mode = "undirected",
+  weighted = T,
+  diag = F)
+
+tmp_color_max <- factor(tmp_hubGenes[tmp_drop,]$DE>0)
+
+#GGplot doesn't evaluate any of these variables until it makes the plot, so we 
+#need to store them in more unique names - we could probably figure out how to
+#store these in the tbl_graph object, but meh
+
+fig4_A <- list()
+fig4_A[["graph"]] <- tmp_graph_max
+
+fig4_A[["size_max"]] <- tmp_size_max
+fig4_A[["color_max"]] <- tmp_color_max
+
+fig4_A[["plot"]] <- as_tbl_graph(fig4_A[["graph"]]) %>%
+   ggraph('igraph', algorithm = 'fr', niter = 1000, weights = weight ) +
+   #ggraph() +
+   geom_edge_arc(colour= "gray50",
+                 lineend = "round",
+                 strength = .1,
+                 aes(edge_width = weight^2,
+                     edge_alpha = weight^2)) +
+  geom_node_point(size = (fig4_A[["size_max"]]-min(fig4_A[["size_max"]])/2)*8,
+                  aes(color = fig4_A[["color_max"]] )) +
+  geom_node_text(aes(label = name), 
+                  repel = T,
+                  check_overlap = T,
+                  size = fig4_A[["size_max"]]*8,
+                  colour="gray10") +
+  scale_edge_width(range = c(0, 3)) +
+  scale_edge_alpha(range = c(0, 1)) +
+  theme_graph(background = "white") +
+  guides(edge_width = "none",
+         edge_alpha = "none",
+         color = "none") +
+  scale_color_manual(values = c("black","red"))
+
+tmp_GO <- hubs_GO[["high"]][[tmp_module]] %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(Ontology) %>%    
+    slice_max(qvalue, n = 9)
+  
+  tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_max(GeneRatio, n = 3) %>% 
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+tmp_plot_GO <- tmp_GO %>%
+    rowwise() %>%
+    mutate(Description =  str_trunc(Description, 75, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>%
+    arrange(Ontology, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(Ontology),
+             fill = factor(Ontology))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 size = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Category",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                       limits=c("BP","CC","MF")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                      limits=c("BP","CC","MF")) +
+    scale_size_continuous(range = c(2.5, 6))
+
+fig4_C <- tmp_plot_GO
+
+```
+
+### Low - Purple (GABA) LP_I
+```{r}
+tmp_module <- "LP_I"
+
+
+tmp_hubGenes <- hubs[["low"]] %>%
+  filter(module == tmp_module) %>%
+  select(ensembl_gene_id, external_gene_name, kTotal, kWithin) %>%
+  left_join(diffResults %>% select(-dplyr::starts_with(c("p","log"))))
+
+tmp_hubGenes <- tmp_hubGenes %>%
+  mutate(DE = is.DE+is.DV+is.DW)
+
+tmp_adj <- adj[["low"]][tmp_hubGenes$ensembl_gene_id, tmp_hubGenes$ensembl_gene_id]
+
+diag(tmp_adj) <- 0
+
+rownames(tmp_adj) <- tmp_hubGenes$external_gene_name
+colnames(tmp_adj) <- tmp_hubGenes$external_gene_name
+
+tmp_size = tmp_hubGenes$kWithin
+tmp_drop <- tmp_size
+
+tmp_quant <- max(0.5, (1-25/length(tmp_drop)))
+tmp_drop <- tmp_drop > quantile(tmp_drop, probs = tmp_quant, type = 8)
+
+tmp_size <- tmp_size[tmp_drop]
+tmp_size = tmp_size - min(tmp_size) 
+tmp_size <- (tmp_size + max(tmp_size))
+tmp_size <- tmp_size/ max(tmp_size)
+
+tmp_adj_max <- tmp_adj[tmp_drop, tmp_drop]
+tmp_adj_max <- tmp_adj_max / max(tmp_adj_max)
+
+tmp_size_max <- tmp_size
+tmp_graph_max <- graph_from_adjacency_matrix(
+  tmp_adj_max,
+  mode = "undirected",
+  weighted = T,
+  diag = F)
+
+tmp_color_max <- factor(tmp_hubGenes[tmp_drop,]$DE>0)
+
+#GGplot doesn't evaluate any of these variables until it makes the plot, so we 
+#need to store them in more unique names - we could probably figure out how to
+#store these in the tbl_graph object, but meh
+
+fig4_B <- list()
+fig4_B[["graph"]] <- tmp_graph_max
+
+fig4_B[["size_max"]] <- tmp_size_max
+fig4_B[["color_max"]] <- tmp_color_max
+
+fig4_B[["plot"]] <- as_tbl_graph(fig4_B[["graph"]]) %>%
+   ggraph('igraph', algorithm = 'fr', niter = 1000, weights = weight ) +
+   #ggraph() +
+   geom_edge_arc(colour= "gray50",
+                 lineend = "round",
+                 strength = .1,
+                 aes(edge_width = weight^2,
+                     edge_alpha = weight^2)) +
+  geom_node_point(size = (fig4_B[["size_max"]]-min(fig4_B[["size_max"]])/2)*8,
+                  aes(color = fig4_B[["color_max"]] )) +
+  geom_node_text(aes(label = name), 
+                  repel = T,
+                  check_overlap = T,
+                  size = fig4_B[["size_max"]]*8,
+                  colour="gray10") +
+  scale_edge_width(range = c(0, 3)) +
+  scale_edge_alpha(range = c(0, 1)) +
+  theme_graph(background = "white") +
+  guides(edge_width = "none",
+         edge_alpha = "none",
+         color = "none") +
+  scale_color_manual(values = c("black","red"))
+
+
+tmp_GO <- hubs_GO[["low"]][[tmp_module]] %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(Ontology) %>%    
+    slice_max(qvalue, n = 9)
+  
+  tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_max(GeneRatio, n = 3) %>% 
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+tmp_plot_GO <- tmp_GO %>%
+    rowwise() %>%
+    mutate(Description =  str_trunc(Description, 75, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>%
+    arrange(Ontology, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(Ontology),
+             fill = factor(Ontology))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 size = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Category",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                       limits=c("BP","CC","MF")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                      limits=c("BP","CC","MF")) +
+    scale_size_continuous(range = c(2.5, 6))
+
+
+fig4_D <- tmp_plot_GO
+```
+
+###Combine
+
+```{r}
+
+tmp <- list(fig4_C, fig4_D)
+
+
+tmp_scale <- tmp %>% map(function(x) 
+{ggplot_build(x)$plot$scales$scales[[3]]$range$range}) %>%
+  unlist %>% range
+
+tmp <- map(tmp, function(x) {x + 
+    scale_size_continuous(limits = tmp_scale)
+    })
+
+tmp <- wrap_plots(
+fig4_A$plot + 
+  ggtitle("High Preference", subtitle = "Greenyellow Module") +
+  theme_classic()+
+  theme(legend.background = element_blank(),
+                legend.box.background = element_blank(),
+                legend.key = element_blank(),
+                panel.background = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank(),
+                panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20),
+        legend.text = element_text(size = 12))+
+  guides(color = guide_legend("Differential Gene"))+
+  scale_color_manual(values = c("black","red"), labels = c("No", "Yes")),
+  fig4_B$plot+ 
+    ggtitle("Low Preference", subtitle = "Purple Module") +
+  theme_classic()+
+  theme(legend.background = element_blank(),
+                legend.box.background = element_blank(),
+                legend.key = element_blank(),
+                panel.background = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank(),
+                panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20),
+        legend.text = element_text(size = 12))+
+  guides(color = guide_legend("Differential Gene"))+
+  scale_color_manual(values = c("black","red"), labels = c("No", "Yes")),
+  tmp[[1]],
+  tmp[[2]],
+  guides = "collect") + plot_annotation(tag_levels = "A")
+
+tmp <- wrap_elements(tmp)
+#ggsave("test.pdf",
+#       plot = tmp,
+#        width=15,
+#        height=7,
+#        units="in")
+```
+
+
+
+
+## 5
+### High - Brown (Glut)
+```{r}
+tmp_module <- "brown"
+
+tmp_hubGenes <- hubs[["high"]] %>%
+  filter(module == tmp_module) %>%
+  select(ensembl_gene_id, external_gene_name, kTotal, kWithin) %>%
+  left_join(diffResults %>% select(-dplyr::starts_with(c("p","log"))))
+
+tmp_hubGenes <- tmp_hubGenes %>%
+  mutate(DE = is.DE+is.DV+is.DW)
+
+tmp_adj <- adj[["high"]][tmp_hubGenes$ensembl_gene_id, tmp_hubGenes$ensembl_gene_id]
+
+diag(tmp_adj) <- 0
+
+rownames(tmp_adj) <- tmp_hubGenes$external_gene_name
+colnames(tmp_adj) <- tmp_hubGenes$external_gene_name
+
+#Take either 50% of connectivity, or limit to 50 genes
+tmp_size = tmp_hubGenes$kWithin
+tmp_drop <- tmp_size
+
+tmp_quant <- max(0.5, (1-25/length(tmp_drop)))
+tmp_drop <- tmp_drop > quantile(tmp_drop, probs = tmp_quant, type = 8)
+
+tmp_size <- tmp_size[tmp_drop]
+tmp_size = tmp_size - min(tmp_size) 
+tmp_size <- (tmp_size + max(tmp_size))
+tmp_size <- tmp_size/ max(tmp_size)
+
+tmp_adj_max <- tmp_adj[tmp_drop, tmp_drop]
+tmp_adj_max <- tmp_adj_max / max(tmp_adj_max)
+
+tmp_size_max <- tmp_size
+tmp_graph_max <- graph_from_adjacency_matrix(
+  tmp_adj_max,
+  mode = "undirected",
+  weighted = T,
+  diag = F)
+
+tmp_color_max <- factor(tmp_hubGenes[tmp_drop,]$DE>0)
+
+#GGplot doesn't evaluate any of these variables until it makes the plot, so we 
+#need to store them in more unique names - we could probably figure out how to
+#store these in the tbl_graph object, but meh
+
+fig5_A <- list()
+fig5_A[["graph"]] <- tmp_graph_max
+
+fig5_A[["size_max"]] <- tmp_size_max
+fig5_A[["color_max"]] <- tmp_color_max
+
+fig5_A[["plot"]] <- as_tbl_graph(fig5_A[["graph"]]) %>%
+   ggraph('igraph', algorithm = 'fr', niter = 1000, weights = weight ) +
+   #ggraph() +
+   geom_edge_arc(colour= "gray50",
+                 lineend = "round",
+                 strength = .1,
+                 aes(edge_width = weight^2,
+                     edge_alpha = weight^2)) +
+  geom_node_point(size = (fig5_A[["size_max"]]-min(fig4_5[["size_max"]])/2)*8,
+                  aes(color = fig5_A[["color_max"]] )) +
+  geom_node_text(aes(label = name), 
+                  repel = T,
+                  check_overlap = T,
+                  size = fig5_A[["size_max"]]*8,
+                  colour="gray10") +
+  scale_edge_width(range = c(0, 3)) +
+  scale_edge_alpha(range = c(0, 1)) +
+  theme_graph(background = "white") +
+  guides(edge_width = "none",
+         edge_alpha = "none",
+         color = "none") +
+  scale_color_manual(values = c("black","red"))
+
+tmp_GO <- hubs_GO[["high"]][[tmp_module]] %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(Ontology) %>%    
+    slice_max(qvalue, n = 9)
+  
+  tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_max(GeneRatio, n = 3) %>% 
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+tmp_plot_GO <- tmp_GO %>%
+    rowwise() %>%
+    mutate(Description =  str_trunc(Description, 75, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>%
+    arrange(Ontology, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(Ontology),
+             fill = factor(Ontology))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 size = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Category",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                       limits=c("BP","CC","MF")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                      limits=c("BP","CC","MF")) +
+    scale_size_continuous(range = c(2.5, 6))
+
+fig5_C <- tmp_plot_GO
+
+```
+
+### Low - Red (Glut)
+```{r}
+tmp_module <- "red"
+
+
+tmp_hubGenes <- hubs[["low"]] %>%
+  filter(module == tmp_module) %>%
+  select(ensembl_gene_id, external_gene_name, kTotal, kWithin) %>%
+  left_join(diffResults %>% select(-dplyr::starts_with(c("p","log"))))
+
+tmp_hubGenes <- tmp_hubGenes %>%
+  mutate(DE = is.DE+is.DV+is.DW)
+
+tmp_adj <- adj[["low"]][tmp_hubGenes$ensembl_gene_id, tmp_hubGenes$ensembl_gene_id]
+
+diag(tmp_adj) <- 0
+
+rownames(tmp_adj) <- tmp_hubGenes$external_gene_name
+colnames(tmp_adj) <- tmp_hubGenes$external_gene_name
+
+tmp_size = tmp_hubGenes$kWithin
+tmp_drop <- tmp_size
+
+tmp_quant <- max(0.5, (1-25/length(tmp_drop)))
+tmp_drop <- tmp_drop > quantile(tmp_drop, probs = tmp_quant, type = 8)
+
+tmp_size <- tmp_size[tmp_drop]
+tmp_size = tmp_size - min(tmp_size) 
+tmp_size <- (tmp_size + max(tmp_size))
+tmp_size <- tmp_size/ max(tmp_size)
+
+tmp_adj_max <- tmp_adj[tmp_drop, tmp_drop]
+tmp_adj_max <- tmp_adj_max / max(tmp_adj_max)
+
+tmp_size_max <- tmp_size
+tmp_graph_max <- graph_from_adjacency_matrix(
+  tmp_adj_max,
+  mode = "undirected",
+  weighted = T,
+  diag = F)
+
+tmp_color_max <- factor(tmp_hubGenes[tmp_drop,]$DE>0)
+
+#GGplot doesn't evaluate any of these variables until it makes the plot, so we 
+#need to store them in more unique names - we could probably figure out how to
+#store these in the tbl_graph object, but meh
+
+fig5_B <- list()
+fig5_B[["graph"]] <- tmp_graph_max
+
+fig5_B[["size_max"]] <- tmp_size_max
+fig5_B[["color_max"]] <- tmp_color_max
+
+fig5_B[["plot"]] <- as_tbl_graph(fig5_B[["graph"]]) %>%
+   ggraph('igraph', algorithm = 'fr', niter = 1000, weights = weight ) +
+   #ggraph() +
+   geom_edge_arc(colour= "gray50",
+                 lineend = "round",
+                 strength = .1,
+                 aes(edge_width = weight^2,
+                     edge_alpha = weight^2)) +
+  geom_node_point(size = (fig5_B[["size_max"]]-min(fig4_B[["size_max"]])/2)*8,
+                  aes(color = fig5_B[["color_max"]] )) +
+  geom_node_text(aes(label = name), 
+                  repel = T,
+                  check_overlap = T,
+                  size = fig5_B[["size_max"]]*8,
+                  colour="gray10") +
+  scale_edge_width(range = c(0, 3)) +
+  scale_edge_alpha(range = c(0, 1)) +
+  theme_graph(background = "white") +
+  guides(edge_width = "none",
+         edge_alpha = "none",
+         color = "none") +
+  scale_color_manual(values = c("black","red"))
+
+
+tmp_GO <- hubs_GO[["low"]][[tmp_module]] %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(Ontology) %>%    
+    slice_max(qvalue, n = 9)
+  
+  tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_max(GeneRatio, n = 3) %>% 
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+tmp_plot_GO <- tmp_GO %>%
+    rowwise() %>%
+    mutate(Description =  str_trunc(Description, 75, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>%
+    arrange(Ontology, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(Ontology),
+             fill = factor(Ontology))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 size = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Category",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                       limits=c("BP","CC","MF")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                      limits=c("BP","CC","MF")) +
+    scale_size_continuous(range = c(2.5, 6))
+
+
+fig5_D <- tmp_plot_GO
+```
+
+###Combine
+
+```{r}
+tmp <- list(fig5_C, fig5_D)
+
+
+tmp_scale <- tmp %>% map(function(x) 
+{ggplot_build(x)$plot$scales$scales[[3]]$range$range}) %>%
+  unlist %>% range
+
+tmp <- map(tmp, function(x) {x + 
+    scale_size_continuous(limits = tmp_scale)
+    })
+
+tmp <- wrap_plots(
+fig5_A$plot + 
+  ggtitle("High Preference", subtitle = "Brown Module") +
+  theme_classic()+
+  theme(legend.background = element_blank(),
+                legend.box.background = element_blank(),
+                legend.key = element_blank(),
+                panel.background = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank(),
+                panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20),
+        legend.text = element_text(size = 12))+
+  guides(color = guide_legend("Differential Gene"))+
+  scale_color_manual(values = c("black","red"), labels = c("No", "Yes")),
+  fig5_B$plot+ 
+    ggtitle("Low Preference", subtitle = "Red Module") +
+  theme_classic()+
+  theme(legend.background = element_blank(),
+                legend.box.background = element_blank(),
+                legend.key = element_blank(),
+                panel.background = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank(),
+                panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20),
+        legend.text = element_text(size = 12))+
+  guides(color = guide_legend("Differential Gene"))+
+  scale_color_manual(values = c("black","red"), labels = c("No", "Yes")),
+  tmp[[1]],
+  tmp[[2]],
+  guides = "collect") + plot_annotation(tag_levels = "A")
+
+tmp
+ggsave("test.pdf",
+       plot = tmp,
+        width=15,
+        height=7,
+        units="in")
+```
+
+
+
+## 6
+### High - Turq
+```{r}
+tmp_module <- "turquoise"
+
+tmp_hubGenes <- hubs[["high"]] %>%
+  filter(module == tmp_module) %>%
+  select(ensembl_gene_id, external_gene_name, kTotal, kWithin) %>%
+  left_join(diffResults %>% select(-dplyr::starts_with(c("p","log"))))
+
+tmp_hubGenes <- tmp_hubGenes %>%
+  mutate(DE = is.DE+is.DV+is.DW)
+
+tmp_adj <- adj[["high"]][tmp_hubGenes$ensembl_gene_id, tmp_hubGenes$ensembl_gene_id]
+
+diag(tmp_adj) <- 0
+
+rownames(tmp_adj) <- tmp_hubGenes$external_gene_name
+colnames(tmp_adj) <- tmp_hubGenes$external_gene_name
+
+#Take either 50% of connectivity, or limit to 50 genes
+tmp_size = tmp_hubGenes$kWithin
+tmp_drop <- tmp_size
+
+tmp_quant <- max(0.5, (1-25/length(tmp_drop)))
+tmp_drop <- tmp_drop > quantile(tmp_drop, probs = tmp_quant, type = 8)
+
+tmp_size <- tmp_size[tmp_drop]
+tmp_size = tmp_size - min(tmp_size) 
+tmp_size <- (tmp_size + max(tmp_size))
+tmp_size <- tmp_size/ max(tmp_size)
+
+tmp_adj_max <- tmp_adj[tmp_drop, tmp_drop]
+tmp_adj_max <- tmp_adj_max / max(tmp_adj_max)
+
+tmp_size_max <- tmp_size
+tmp_graph_max <- graph_from_adjacency_matrix(
+  tmp_adj_max,
+  mode = "undirected",
+  weighted = T,
+  diag = F)
+
+tmp_color_max <- factor(tmp_hubGenes[tmp_drop,]$DE>0)
+
+#GGplot doesn't evaluate any of these variables until it makes the plot, so we 
+#need to store them in more unique names - we could probably figure out how to
+#store these in the tbl_graph object, but meh
+
+fig5_A <- list()
+fig5_A[["graph"]] <- tmp_graph_max
+
+fig5_A[["size_max"]] <- tmp_size_max
+fig5_A[["color_max"]] <- tmp_color_max
+
+fig5_A[["plot"]] <- as_tbl_graph(fig5_A[["graph"]]) %>%
+   ggraph('igraph', algorithm = 'fr', niter = 1000, weights = weight ) +
+   #ggraph() +
+   geom_edge_arc(colour= "gray50",
+                 lineend = "round",
+                 strength = .1,
+                 aes(edge_width = weight^2,
+                     edge_alpha = weight^2)) +
+  geom_node_point(size = (fig5_A[["size_max"]]-min(fig5_A[["size_max"]])/2)*8,
+                  aes(color = fig5_A[["color_max"]] )) +
+  geom_node_text(aes(label = name), 
+                  repel = T,
+                  check_overlap = T,
+                  size = fig5_A[["size_max"]]*8,
+                  colour="gray10") +
+  scale_edge_width(range = c(0, 3)) +
+  scale_edge_alpha(range = c(0, 1)) +
+  theme_graph(background = "white") +
+  guides(edge_width = "none",
+         edge_alpha = "none",
+         color = "none") +
+  scale_color_manual(values = c("black","red"))
+
+tmp_GO <- hubs_GO[["high"]][[tmp_module]] %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(Ontology) %>%    
+    slice_max(qvalue, n = 9)
+  
+  tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_max(GeneRatio, n = 3) %>% 
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+tmp_plot_GO <- tmp_GO %>%
+    rowwise() %>%
+    mutate(Description =  str_trunc(Description, 75, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>%
+    arrange(Ontology, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(Ontology),
+             fill = factor(Ontology))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 size = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Category",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                       limits=c("BP","CC","MF")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                      limits=c("BP","CC","MF")) +
+    scale_size_continuous(range = c(2.5, 6))
+
+fig5_C <- tmp_plot_GO
+
+```
+
+### Low - blue
+```{r}
+tmp_module <- "blue"
+
+
+tmp_hubGenes <- hubs[["low"]] %>%
+  filter(module == tmp_module) %>%
+  select(ensembl_gene_id, external_gene_name, kTotal, kWithin) %>%
+  left_join(diffResults %>% select(-dplyr::starts_with(c("p","log"))))
+
+tmp_hubGenes <- tmp_hubGenes %>%
+  mutate(DE = is.DE+is.DV+is.DW)
+
+tmp_adj <- adj[["low"]][tmp_hubGenes$ensembl_gene_id, tmp_hubGenes$ensembl_gene_id]
+
+diag(tmp_adj) <- 0
+
+rownames(tmp_adj) <- tmp_hubGenes$external_gene_name
+colnames(tmp_adj) <- tmp_hubGenes$external_gene_name
+
+tmp_size = tmp_hubGenes$kWithin
+tmp_drop <- tmp_size
+
+tmp_quant <- max(0.5, (1-25/length(tmp_drop)))
+tmp_drop <- tmp_drop > quantile(tmp_drop, probs = tmp_quant, type = 8)
+
+tmp_size <- tmp_size[tmp_drop]
+tmp_size = tmp_size - min(tmp_size) 
+tmp_size <- (tmp_size + max(tmp_size))
+tmp_size <- tmp_size/ max(tmp_size)
+
+tmp_adj_max <- tmp_adj[tmp_drop, tmp_drop]
+tmp_adj_max <- tmp_adj_max / max(tmp_adj_max)
+
+tmp_size_max <- tmp_size
+tmp_graph_max <- graph_from_adjacency_matrix(
+  tmp_adj_max,
+  mode = "undirected",
+  weighted = T,
+  diag = F)
+
+tmp_color_max <- factor(tmp_hubGenes[tmp_drop,]$DE>0)
+
+#GGplot doesn't evaluate any of these variables until it makes the plot, so we 
+#need to store them in more unique names - we could probably figure out how to
+#store these in the tbl_graph object, but meh
+
+fig5_B <- list()
+fig5_B[["graph"]] <- tmp_graph_max
+
+fig5_B[["size_max"]] <- tmp_size_max
+fig5_B[["color_max"]] <- tmp_color_max
+
+fig5_B[["plot"]] <- as_tbl_graph(fig5_B[["graph"]]) %>%
+   ggraph('igraph', algorithm = 'fr', niter = 1000, weights = weight ) +
+   #ggraph() +
+   geom_edge_arc(colour= "gray50",
+                 lineend = "round",
+                 strength = .1,
+                 aes(edge_width = weight^2,
+                     edge_alpha = weight^2)) +
+  geom_node_point(size = (fig5_B[["size_max"]]-min(fig5_B[["size_max"]])/2)*8,
+                  aes(color = fig5_B[["color_max"]] )) +
+  geom_node_text(aes(label = name), 
+                  repel = T,
+                  check_overlap = T,
+                  size = fig5_B[["size_max"]]*8,
+                  colour="gray10") +
+  scale_edge_width(range = c(0, 3)) +
+  scale_edge_alpha(range = c(0, 1)) +
+  theme_graph(background = "white") +
+  guides(edge_width = "none",
+         edge_alpha = "none",
+         color = "none") +
+  scale_color_manual(values = c("black","red"))
+
+
+tmp_GO <- hubs_GO[["low"]][[tmp_module]] %>% 
+  left_join(goInfo[["goTerm"]], by = c("ID" = "go_id")) %>%
+    ungroup %>%
+    rowwise %>%
+    mutate(qvalue = -log10(qvalue)) %>%
+    group_by(Ontology) %>%    
+    slice_max(qvalue, n = 9)
+  
+  tmp_GO2 <- tmp_GO %>% 
+    slice_max(qvalue, n = 3) %>%
+    slice_max(GeneRatio, n = 3) %>% 
+    slice_max(nterms, n = 3) %>%
+    slice_max(pvalue, n = 3) %>%
+  ungroup() 
+  
+  tmp_n <- nrow(tmp_GO2)
+  if (tmp_n < 9) {
+    tmp_GO <- bind_rows(
+      tmp_GO2, #Top 3
+      tmp_GO %>% #Fill in rest
+        ungroup() %>%
+        filter(!(ID %in% tmp_GO2$ID)) %>%
+        slice_max(qvalue, n = (9 - tmp_n)) %>%
+        slice_max(GeneRatio, n = (9 - tmp_n)) %>%
+        slice_max(nterms, n = (9 - tmp_n)) %>%
+        slice_max(pvalue, n = (9 - tmp_n))
+    )
+  } else {
+    tmp_GO <- tmp_GO2
+  }
+  
+tmp_plot_GO <- tmp_GO %>%
+    rowwise() %>%
+    mutate(Description =  str_trunc(Description, 75, side = c("right")),
+           GeneRatio = eval(str2expression(GeneRatio))) %>%
+    ungroup() %>%
+    arrange(Ontology, desc(GeneRatio), desc(qvalue)) %>%
+    mutate(position = factor(row_number())) %>%
+  ggplot(aes(x = position,
+             y = GeneRatio,
+             color = factor(Ontology),
+             fill = factor(Ontology))) +
+    geom_segment(aes(xend=position,y=0,yend=GeneRatio),
+                 size = 1.5, alpha = 0.5,
+                 show.legend = FALSE) +
+  geom_point(aes(size = qvalue)) + 
+    geom_text(aes(label = Description,
+                  y = 0),
+              size = 12*0.36,
+              color = "black",
+              hjust = -0.01,
+              vjust = -.5,
+              show.legend = FALSE) +
+    coord_flip() + theme_classic() +
+    guides(size = guide_legend("-log10(FDR)",nrow=2,title.position="top"),
+           color = guide_legend("Category",nrow=2,title.position="top",
+                                override.aes = list(size = 3)),
+           fill = "none") +
+    theme(legend.position = "bottom",
+          axis.text.y = element_blank(),
+          axis.ticks = element_blank(),
+          axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12))+
+    xlab("") + ylab("Genes Ratio") + 
+    scale_color_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                       limits=c("BP","CC","MF")) +
+    scale_fill_manual(values = hcl.colors(n = 6, "Dark 3")[c(2,3,6)],
+                      limits=c("BP","CC","MF")) +
+    scale_size_continuous(range = c(2.5, 6))
+
+
+fig5_D <- tmp_plot_GO
+```
+
+###Combine
+
+```{r}
+tmp <- list(fig5_C, fig5_D)
+
+
+tmp_scale <- tmp %>% map(function(x) 
+{ggplot_build(x)$plot$scales$scales[[3]]$range$range}) %>%
+  unlist %>% range
+
+tmp <- map(tmp, function(x) {x + 
+    scale_size_continuous(limits = tmp_scale)
+    })
+
+tmp <- wrap_plots(
+fig5_A$plot + 
+  ggtitle("High Preference", subtitle = "Turquoise Module") +
+  theme_classic()+
+  theme(legend.background = element_blank(),
+                legend.box.background = element_blank(),
+                legend.key = element_blank(),
+                panel.background = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank(),
+                panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20),
+        legend.text = element_text(size = 12))+
+  guides(color = guide_legend("Differential Gene"))+
+  scale_color_manual(values = c("black","red"), labels = c("No", "Yes")),
+  fig5_B$plot+ 
+    ggtitle("Low Preference", subtitle = "Blue Module") +
+  theme_classic()+
+  theme(legend.background = element_blank(),
+                legend.box.background = element_blank(),
+                legend.key = element_blank(),
+                panel.background = element_blank(),
+                axis.title = element_blank(),
+                axis.text = element_blank(),
+                axis.line = element_blank(),
+                axis.ticks = element_blank(),
+                panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20),
+        legend.text = element_text(size = 12))+
+  guides(color = guide_legend("Differential Gene"))+
+  scale_color_manual(values = c("black","red"), labels = c("No", "Yes")),
+  tmp[[1]],
+  tmp[[2]],
+  guides = "collect") + plot_annotation(tag_levels = "A")
+
+tmp
+ggsave("test.pdf",
+       plot = tmp,
+        width=15,
+        height=7,
+        units="in")
+```
+
+
+
+# Supplemental Figures
+
+## Zeros
+
+### Mice
+```{r}
+test3 <- apply(voomNormalized_all , 1 , function(x) (x - mean(x)) / sd(x) )
+
+test4 <- data.frame(n = rowSums(test3 < -3),
+                    mouse = rownames(test3)) %>%
+  mutate(perc = n / 162)
+
+wrap_plots(gghistogram(test4,
+            x = "perc",
+            xlab = "",
+            fill = "grey"),
+    ggecdf(test4,
+          x = "perc",
+          xlab = "Percent of genes a mouse is a z-score(<-3) outlier in"),
+  ncol = 1
+)  +  plot_annotation(tag_levels = "A") & theme(axis.text = element_text(size = 12),
+          axis.title = element_text(size = 15))
+```
+
+### Genes
+```{r}
+test5 <- data.frame(n = colSums(test3 < -3),
+                    gene = colnames(test3)) %>%
+  mutate(perc = n / 2)
+
+wrap_plots(  gghistogram(test5,
+                         x = "n",
+                         xlab = "",
+                         fill = "grey"),
+             ggecdf(test5,
+                    x = "n",
+                    xlab = "# of a genes with N low-count outlier mice"),
+             ncol = 1
+)  +  plot_annotation(tag_levels = "A") & theme(axis.text = element_text(size = 12),
+                                                axis.title = element_text(size = 15))
+```
+
+# Volcano plots + venn diagrams
+```{r}
+wrap_plots(
+  DE %>%
+    mutate(dir =  case_when(logFC < 0 & p.adj < 0.05 ~ "Down",
+                            logFC > 0 & p.adj < 0.05 ~ "Up",
+                            TRUE ~ "Not Sig.")) %>%
+    ggplot() +
+    geom_point(aes(x = logFC,
+                   y = -log10(p.adj),
+                   alpha = 0.2,
+                   color = factor(dir, levels = c("Not Sig.", "Down", "Up"))),
+               shape = 16) +
+    scale_colour_manual(values = c("grey", hcl.colors(n = 6, "Dark 3")[c(5,1)]),
+                        aesthetics = c("colour", "fill")) +
+    geom_hline(yintercept = -log10(0.05), linetype = 2) +
+    theme_classic() +
+    labs(x = "Log Fold Change",
+         y = "-log10(FDR)") +
+    theme(axis.text = element_text(size = 12), 
+          axis.title = element_text(size = 15),
+          legend.text = element_text(size = 12),
+          legend.title = element_blank()) +
+    guides(alpha = "none"),
+  DV %>%
+  mutate(dir =  case_when(logFC < 0 & p.adj < 0.05 ~ "Down",
+                          logFC > 0 & p.adj < 0.05 ~ "Up",
+                          TRUE ~ "Not Sig.")) %>%
+  ggplot() +
+  geom_point(aes(x = logFC,
+                 y = -log10(p.adj),
+                 alpha = 0.2,
+                 color = factor(dir, levels = c("Not Sig.", "Down", "Up"))),
+             shape = 16) +
+  scale_colour_manual(values = c("grey", hcl.colors(n = 6, "Dark 3")[c(5,1)]),
+                      aesthetics = c("colour", "fill")) +
+  geom_hline(yintercept = -log10(0.05), linetype = 2) +
+  theme_classic() +
+  labs(x = "Log Fold Change",
+       y = "-log10(FDR)") +
+  theme(axis.text = element_text(size = 12), 
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        legend.title = element_blank()) +
+  guides(alpha = "none"),
+  DW %>%
+  mutate(dir =  case_when(logFC < 0 & p.adj < 0.05 ~ "Down",
+                          logFC > 0 & p.adj < 0.05 ~ "Up",
+                          TRUE ~ "Not Sig.")) %>%
+  ggplot() +
+  geom_point(aes(x = logFC,
+                 y = -log10(p.adj),
+                 alpha = 0.2,
+                 color = factor(dir, levels = c("Not Sig.", "Down", "Up"))),
+             shape = 16) +
+  scale_colour_manual(values = c("grey", hcl.colors(n = 6, "Dark 3")[c(5,1)]),
+                      aesthetics = c("colour", "fill")) +
+  geom_hline(yintercept = -log10(0.05), linetype = 2) +
+  theme_classic() +
+  labs(x = "Log Fold Change",
+       y = "-log10(FDR)") +
+  theme(axis.text = element_text(size = 12), 
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        legend.title = element_blank()) +
+  guides(alpha = "none"),
+  nrow = 1)
+
+
+
+
+
+
+data_frame(x = 1:6,
+           y = rep(1,6)) %>%
+ggplot() +
+  geom_col(aes(x = x, y = y, fill = factor(x))) +
+  scale_fill_manual(values = hcl.colors(n = 6, "Dark 3"))
+```
+
+```{r}
+DV_test <- DV %>%
+  rowwise() %>%
+  mutate(test = log2(HP/LP)) %>%
+  ungroup()
+```
+
+
+
+###Diff HM
+```{r}
+##Heatmap High
+tmp_HM <- modules_summary[["diff"]] %>%
+  select(module,
+         high, low,
+         DE, DE_down, DE_up,
+         DV, DV_up, DV_down,
+         DW, DW_up, DW_down,
+        GABAergic, Glutamatergic, "Non-Neuronal")
+
+tmp_HM <- tmp_HM %>%
+  filter(hubs_GO[["diff"]] %>% sapply(nrow) > 0,
+         module != "grey") %>%
+  mutate(across(where(is.numeric), function(x) p.adjust(x, method="fdr"))) %>%
+  rowwise %>%
+  filter(any(c_across(where(is.numeric)) < 0.05)) %>% 
+  mutate(hub = (high < 0.05 || low < 0.05),
+         diff = any(c_across(cols = c(DE, DE_up, DE_down,
+                                      DV, DV_up, DV_down,
+                                      DW, DW_up, DW_down)) < 0.05)) %>%
+  ungroup %>%
+  mutate(across(where(is.numeric), function(x) -log10(x))) %>%
+  mutate(across(where(is.numeric), function(x) {
+    x[x>10] <- 10
+    x[x< -log10(0.05)] <- 0
+    return(x)}
+    ))
+
+tmp_HM <- tmp_HM %>%
+  rowwise() %>%
+  mutate(row_split = case_when(
+    all(c_across(c(hub, diff))) ~ 1,
+    hub ~ 2,
+    diff ~ 3)) %>%
+  ungroup()
+
+tmp_HM <- tmp_HM %>% 
+  filter(!is.na(row_split)) %>%
+  select( -DE, -DW, -DV) %>%
+  mutate(row_split = factor(row_split,
+                            labels = c("Both","Hubs","Diff"))) %>%
+  mutate(row_split = factor(row_split, levels = c("Diff", "Hubs", "Both")))
+```
+
+
+
+```{r}
+tmp_HM_2 <- tmp_HM %>%
+  select(DE_down, DE_up,
+         DV_down, DV_up,
+         DW_down, DW_up,
+         GABAergic, Glutamatergic, "Non-Neuronal",
+         high, low) %>% as.matrix
+
+tmp <- Heatmap(tmp_HM_2,
+        cluster_columns = F,
+        column_split = factor(c("DE","DE","DV","DV","DW","DW", "Cell Type", "Cell Type", "Cell Type", "Hubs", "Hubs"),
+                              levels = c("DE", "DV", "DW", "Cell Type", "Hubs")),
+        row_split = tmp_HM$row_split,
+        show_row_dend = F,
+        column_gap = unit(2,"mm"),
+        column_labels = c(rep(c("Down", "Up"),3), "GABAergic", "Glutamatergic", "Non-Neuronal","High", "Low"),
+        layer_fun = function(j, i, x, y, w, h, fill) {
+          v <- pindex(tmp_HM_2,i,j)
+          col <- colorRamp2(c(0,5,10), hcl_palette = "Inferno")(v)
+          grid.rect(x, y, w, h, gp = gpar(fill = col, col = col))
+        },
+        show_heatmap_legend = F,
+        row_labels =tmp_HM$module,
+        column_names_rot = 45)
+
+
+
+lgd = Legend(title = "-log10(FDR)",
+              direction = "horizontal",
+       col_fun = colorRamp2(c(0,5,10), hcl_palette = "Inferno"),
+       at = c(0,5,10))
+
+
+wrap_elements(grid.grabExpr(draw(tmp,
+                                 heatmap_legend_list = list(lgd),
+                                 heatmap_legend_side = "right",
+                                 newpage = FALSE)))
+
+
+
+```
+
+```{r}
+test <- lapply(tmp_enrich,
+               function(x) {
+                 x <- x %>% filter(rank>2.5)
+                 return(
+                   fisher.test(DE$ensembl_gene_id %in% x$ensembl_gene_id,
+                               DE$is.DE,
+                               alternative = "g")$p.value
+                 )
+               })
+View(test)
+```
+
+
+#Supplemental Tables
+
+## 1
+```{r}
+#JQA-S1A - Annotation for genes included in analysis
+fit_all$genes %>% clipr::write_clip()
+
+#JQA-S1B - Annotation for genes excluded from analysis
+droppedGenes %>% clipr::write_clip()
+```
+
+## 2
+```{r}
+#JQA-S2A - Annotation for seven samples dropped from analysis
+droppedSamples %>% 
+  select(SampleID, Genotype, Family, Sex, LibraryPrepBatch, reason) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+
+#JQA-S2B - Annotation included in analysis analysis
+phenotypeSelected %>%
+  select(SampleID, Genotype, Family, Sex, LibraryPrepBatch) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+
+#JQA-S2C - Annotation for mice with >1% zero gene counts
+test4 %>%
+  filter(perc >= 1) %>% 
+  mutate(SampleID = mouse) %>%
+  select(SampleID) %>%
+  left_join(phenotypeSelected) %>%
+  select(SampleID, Genotype, Family, Sex, LibraryPrepBatch) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+```
+
+## 3
+```{r}
+#JQA-S3A - PCA Scores
+plottingData_PCA$plottingData %>%
+  rename(SampleID = joinKey) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+
+#JQA-S3B - PC Anova Scores
+plottingData_PCA$anova %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+```
+
+## 4
+```{r}
+#JQA-S4A - Annotation of Genes in WGCNA/DV/DW
+fit_all$genes %>%
+  filter((ensembl_gene_id %in% DV$ensembl_gene_id)) %>%
+  select(-SamplesWithReads) %>%
+  mutate(if_else(gene_biotype == "protein_coding", 
+                 "Low Connectivity",
+                 "Non-protein coding")) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+
+
+#JQA-S4B - Annotation of Genes in WGCNA/DV/DW
+fit_all$genes %>%
+  filter(!(ensembl_gene_id %in% DV$ensembl_gene_id)) %>%
+  select(-SamplesWithReads) %>%
+  mutate(if_else(gene_biotype == "protein_coding", 
+                 "Low Connectivity",
+                 "Non-protein coding")) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+```
+
+## 5
+```{r}
+#JQA-S5 Gene Modules
+list(
+  high = modules[["high"]] %>% 
+    select(ensembl_gene_id, external_gene_name, module, kWithin, ClusterCoef, MAR) %>%
+    rename(high = module,
+           kWithin_high = kWithin,
+           ClusterCoef_high = ClusterCoef,
+           MAR_high = MAR),
+  low = modules[["low_10"]] %>%
+    select(ensembl_gene_id, module, kWithin, ClusterCoef, MAR) %>%
+    rename(low = module,
+           kWithin_low = kWithin,
+           ClusterCoef_low = ClusterCoef,
+           MAR_low = MAR),
+  high_hubs = hubs[["high"]] %>%
+    select(ensembl_gene_id) %>%
+    mutate(high_hub = 1),
+  low_hubs = hubs[["low"]] %>%
+    select(ensembl_gene_id) %>%
+    mutate(low_hub = 1),
+  unique_high_hubs = unique_hubs[["high"]] %>%
+    select(ensembl_gene_id) %>%
+    mutate(unique_high_hub = 1),
+  unique_low_hubs = unique_hubs[["low"]] %>%
+    select(ensembl_gene_id) %>%
+    mutate(unique_low_hub = 1)
+) %>%
+  reduce(left_join) %>% 
+  mutate(across(where(is.numeric), function(x) replace_na(x, 0))) %>%
+  left_join(diffResults %>% select(ensembl_gene_id, is.DE, is.DV, is.DW)) %>%
+  remove_rownames() %>%
+  clipr::write_clip()
+
+tmp_HM_2 <- tmp_HM %>%
+  select(DE_down, DE_up,
+         DV_down, DV_up,
+         DW_down, DW_up,
+         Unique_hubs, Hubs,
+         B6, PWK,
+         "Olig", "Microglia", "Astrocyte",
+         "OPC", "End",
+         GABAergic, Glutamatergic,
+         all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1),"_EXC")),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1),"_EXC"))
+         ) %>% as.matrix
+```
+
+## 6
+```{r}
+#JQA-S6A - Module Summaries High
+modules_summary[["high"]] %>%
+    select(module,
+         kWithin_sum, kOut_sum,
+         Density, Centralization, Heterogeneity,
+         is.DE_sum, is.DV_sum, is.DW_sum, n,
+         DE, DE_down, DE_up,
+         DV, DV_down, DV_up,
+         DW, DW_down, DW_up,
+         B6, PWK,
+         Astrocyte, Microglia, Olig, OPC,
+         gaba, glut,
+         all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1))),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1))),
+         L1000, high, low) %>% 
+  rename(
+    Inh = gaba,
+    Exc = glut,
+    Astroctyes = Astrocyte,
+    Oligo = Olig,
+    Inh_01 = `Gaba_01`,
+    Inh_02 = `Gaba_02`,
+    Inh_03 = `Gaba_03`,
+    Inh_04 = `Gaba_04`,
+    Inh_05 = `Gaba_05`,
+    Inh_06 = `Gaba_06`,
+    Inh_07 = `Gaba_07`,
+    Inh_08 = `Gaba_08`,
+    Inh_09 = `Gaba_09`,
+    Inh_10 = `Gaba_10`,
+    Inh_11 = `Gaba_11`,
+    Inh_12 = `Gaba_12`,
+    Inh_13 = `Gaba_13`,
+    Inh_14 = `Gaba_14`,
+    Inh_15 = `Gaba_15`,
+    Inh_16 = `Gaba_16`,
+    Inh_17 = `Gaba_17`,
+    Inh_18 = `Gaba_18`,
+    Exc_01 = `Glut_01`,
+    Exc_02 = `Glut_02`,
+    Exc_03 = `Glut_03`,
+    Exc_04 = `Glut_04`,
+    Exc_05 = `Glut_05`,
+    Exc_06 = `Glut_06`,
+    Exc_07 = `Glut_07`,
+    Exc_08 = `Glut_08`,
+    Exc_09 = `Glut_09`,
+    Exc_10 = `Glut_10`) %>%
+  remove_rownames() %>%
+  mutate(across(11:58, function(x) p.adjust(x, method = "fdr"))) %>%
+    left_join(
+    data_frame(module = rownames(tmp_overlap_hub),
+               LP_Module = colnames(tmp_overlap_hub)[apply(tmp_overlap_hub, 1 , which.max)],
+               max_JS = apply(tmp_overlap_hub, 1 , max))
+    ) %>% 
+  clipr::write_clip()
+
+#JQA-S6A - Module Summaries Low
+modules_summary[["low_10"]] %>%
+    select(module,
+         kWithin_sum, kOut_sum,
+         Density, Centralization, Heterogeneity,
+         is.DE_sum, is.DV_sum, is.DW_sum, n,
+         DE, DE_down, DE_up,
+         DV, DV_down, DV_up,
+         DW, DW_down, DW_up,
+         B6, PWK,
+         Astrocyte, Microglia, Olig, OPC,
+         gaba, glut,
+         all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1))),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1))),
+         L1000, high, low) %>%
+  rename(
+    Inh = gaba,
+    Exc = glut,
+    Astroctyes = Astrocyte,
+    Oligo = Olig,
+    Inh_01 = `Gaba_01`,
+    Inh_02 = `Gaba_02`,
+    Inh_03 = `Gaba_03`,
+    Inh_04 = `Gaba_04`,
+    Inh_05 = `Gaba_05`,
+    Inh_06 = `Gaba_06`,
+    Inh_07 = `Gaba_07`,
+    Inh_08 = `Gaba_08`,
+    Inh_09 = `Gaba_09`,
+    Inh_10 = `Gaba_10`,
+    Inh_11 = `Gaba_11`,
+    Inh_12 = `Gaba_12`,
+    Inh_13 = `Gaba_13`,
+    Inh_14 = `Gaba_14`,
+    Inh_15 = `Gaba_15`,
+    Inh_16 = `Gaba_16`,
+    Inh_17 = `Gaba_17`,
+    Inh_18 = `Gaba_18`,
+    Exc_01 = `Glut_01`,
+    Exc_02 = `Glut_02`,
+    Exc_03 = `Glut_03`,
+    Exc_04 = `Glut_04`,
+    Exc_05 = `Glut_05`,
+    Exc_06 = `Glut_06`,
+    Exc_07 = `Glut_07`,
+    Exc_08 = `Glut_08`,
+    Exc_09 = `Glut_09`,
+    Exc_10 = `Glut_10`) %>%
+  remove_rownames() %>%
+  mutate(across(11:58, function(x) p.adjust(x, method = "fdr"))) %>%
+    left_join(
+    data_frame(module = colnames(tmp_overlap_hub),
+               HP_Module = rownames(tmp_overlap_hub)[apply(tmp_overlap_hub, 2 , which.max)],
+               max_JS = apply(tmp_overlap_hub, 2 , max))
+    ) %>% 
+  clipr::write_clip()
+
+#JQA-S6C - hubs Summaries High
+hubs_summary[["high"]] %>%
+    select(module,
+         kWithin_sum, kOut_sum,
+         Density, Centralization, Heterogeneity,
+         is.DE_sum, is.DV_sum, is.DW_sum, n,
+         DE, DE_down, DE_up,
+         DV, DV_down, DV_up,
+         DW, DW_down, DW_up,
+         B6, PWK,
+         Astrocyte, Microglia, Olig, OPC,
+         gaba, glut,
+         all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1))),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1))),
+         L1000, high, low) %>%
+  rename(
+    Inh = gaba,
+    Exc = glut,
+    Astroctyes = Astrocyte,
+    Oligo = Olig,
+    Inh_01 = `Gaba_01`,
+    Inh_02 = `Gaba_02`,
+    Inh_03 = `Gaba_03`,
+    Inh_04 = `Gaba_04`,
+    Inh_05 = `Gaba_05`,
+    Inh_06 = `Gaba_06`,
+    Inh_07 = `Gaba_07`,
+    Inh_08 = `Gaba_08`,
+    Inh_09 = `Gaba_09`,
+    Inh_10 = `Gaba_10`,
+    Inh_11 = `Gaba_11`,
+    Inh_12 = `Gaba_12`,
+    Inh_13 = `Gaba_13`,
+    Inh_14 = `Gaba_14`,
+    Inh_15 = `Gaba_15`,
+    Inh_16 = `Gaba_16`,
+    Inh_17 = `Gaba_17`,
+    Inh_18 = `Gaba_18`,
+    Exc_01 = `Glut_01`,
+    Exc_02 = `Glut_02`,
+    Exc_03 = `Glut_03`,
+    Exc_04 = `Glut_04`,
+    Exc_05 = `Glut_05`,
+    Exc_06 = `Glut_06`,
+    Exc_07 = `Glut_07`,
+    Exc_08 = `Glut_08`,
+    Exc_09 = `Glut_09`,
+    Exc_10 = `Glut_10`) %>%
+  remove_rownames() %>%
+  mutate(across(11:58, function(x) p.adjust(x, method = "fdr"))) %>%
+    left_join(
+    data_frame(module = rownames(tmp_overlap_hub),
+               LP_Module = colnames(tmp_overlap_hub)[apply(tmp_overlap_hub, 1 , which.max)],
+               max_JS = apply(tmp_overlap_hub, 1 , max))
+    ) %>% 
+  clipr::write_clip()
+
+
+#JQA-S6D - hubs Summaries low
+hubs_summary[["low_10"]] %>%
+    select(module,
+         kWithin_sum, kOut_sum,
+         Density, Centralization, Heterogeneity,
+         is.DE_sum, is.DV_sum, is.DW_sum, n,
+         DE, DE_down, DE_up,
+         DV, DV_down, DV_up,
+         DW, DW_down, DW_up,
+         B6, PWK,
+         Astrocyte, Microglia, Olig, OPC,
+         gaba, glut,
+         all_of(paste0("Gaba_", formatC(1:18,
+                                        format = "d", flag = "0", digits = 1))),
+         all_of(paste0("Glut_", formatC(1:10,
+                                        format = "d", flag = "0", digits = 1))),
+         L1000, high, low) %>%
+  rename(
+    Inh = gaba,
+    Exc = glut,
+    Astroctyes = Astrocyte,
+    Oligo = Olig,
+    Inh_01 = `Gaba_01`,
+    Inh_02 = `Gaba_02`,
+    Inh_03 = `Gaba_03`,
+    Inh_04 = `Gaba_04`,
+    Inh_05 = `Gaba_05`,
+    Inh_06 = `Gaba_06`,
+    Inh_07 = `Gaba_07`,
+    Inh_08 = `Gaba_08`,
+    Inh_09 = `Gaba_09`,
+    Inh_10 = `Gaba_10`,
+    Inh_11 = `Gaba_11`,
+    Inh_12 = `Gaba_12`,
+    Inh_13 = `Gaba_13`,
+    Inh_14 = `Gaba_14`,
+    Inh_15 = `Gaba_15`,
+    Inh_16 = `Gaba_16`,
+    Inh_17 = `Gaba_17`,
+    Inh_18 = `Gaba_18`,
+    Exc_01 = `Glut_01`,
+    Exc_02 = `Glut_02`,
+    Exc_03 = `Glut_03`,
+    Exc_04 = `Glut_04`,
+    Exc_05 = `Glut_05`,
+    Exc_06 = `Glut_06`,
+    Exc_07 = `Glut_07`,
+    Exc_08 = `Glut_08`,
+    Exc_09 = `Glut_09`,
+    Exc_10 = `Glut_10`) %>%
+  remove_rownames() %>%
+  mutate(across(11:58, function(x) p.adjust(x, method = "fdr"))) %>%
+    left_join(
+    data_frame(module = colnames(tmp_overlap_hub),
+               HP_Module = rownames(tmp_overlap_hub)[apply(tmp_overlap_hub, 2 , which.max)],
+               max_JS = apply(tmp_overlap_hub, 2 , max))
+    ) %>% 
+  clipr::write_clip()
+```
+
+## 7
+```{r}
+#JQA-S7 - DEGs
+DE %>%
+  filter(is.DE == 1) %>%
+  select(-adj.P.Val, -SamplesWithReads,-is.DE) %>%
+  remove_rownames() %>% 
+  left_join(diffResults %>%
+              select(ensembl_gene_id,is.DE,is.DV,is.DW)) %>% 
+  dplyr::rename(
+    DE = is.DE,
+    DV = is.DV,
+    DW = is.DW
+  ) %>% 
+  left_join(modules[["high"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    HP_Module = module) %>%
+  left_join(hubs[["high"]] %>%
+              mutate(HP_Hub = 1,
+                     HP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, HP_Hub, HP_Unique_Hub)) %>%
+  left_join(modules[["low"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    LP_Module = module) %>%
+    left_join(hubs[["low"]] %>%
+              mutate(LP_Hub = 1,
+                     LP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, LP_Hub, LP_Unique_Hub)) %>%
+  clipr::write_clip()
+```
+
+## 8
+```{r}
+#JQA-S8 - DVGs
+DV %>%
+  left_join(fit_all$genes) %>%
+  filter(is.DV == 1) %>%
+  select(-is.DV, -SamplesWithReads, -description) %>%
+  relocate(chromosome_name:gene_biotype, .before = p) %>%
+  remove_rownames() %>% 
+  left_join(diffResults %>%
+              select(ensembl_gene_id,is.DE,is.DV,is.DW)) %>% 
+  dplyr::rename(
+    DE = is.DE,
+    DV = is.DV,
+    DW = is.DW
+  ) %>% 
+  left_join(modules[["high"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    HP_Module = module) %>%
+  left_join(hubs[["high"]] %>%
+              mutate(HP_Hub = 1,
+                     HP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, HP_Hub, HP_Unique_Hub)) %>%
+  left_join(modules[["low"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    LP_Module = module) %>%
+    left_join(hubs[["low"]] %>%
+              mutate(LP_Hub = 1,
+                     LP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, LP_Hub, LP_Unique_Hub)) %>%
+  clipr::write_clip()
+```
+
+## 9
+```{r}
+#JQA-S9 - DWGs
+DW %>%
+  left_join(fit_all$genes) %>%
+  filter(is.DW == 1) %>%
+  select(-is.DW, -SamplesWithReads, -description) %>%
+  relocate(chromosome_name:gene_biotype, .before = p) %>%
+  rename(corr_High = corrA,
+         corr_Low = corrB) %>%
+  remove_rownames() %>% 
+  left_join(diffResults %>%
+              select(ensembl_gene_id,is.DE,is.DV,is.DW)) %>% 
+  dplyr::rename(
+    DE = is.DE,
+    DV = is.DV,
+    DW = is.DW
+  ) %>% 
+  left_join(modules[["high"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    HP_Module = module) %>%
+  left_join(hubs[["high"]] %>%
+              mutate(HP_Hub = 1,
+                     HP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, HP_Hub, HP_Unique_Hub)) %>%
+  left_join(modules[["low"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    LP_Module = module) %>%
+    left_join(hubs[["low"]] %>%
+              mutate(LP_Hub = 1,
+                     LP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, LP_Hub, LP_Unique_Hub)) %>%
+  clipr::write_clip()
+```
+
+## 10
+```{r}
+#JQA-S10 - PWK Signature Genes
+enrichInfo[["PWK"]] %>%
+  left_join(fit_all$genes) %>%
+  select(-SamplesWithReads, -description) %>%
+  left_join(diffResults %>%
+              select(ensembl_gene_id,is.DE,is.DV,is.DW)) %>% 
+  dplyr::rename(
+    DE = is.DE,
+    DV = is.DV,
+    DW = is.DW
+  ) %>% 
+  left_join(modules[["high"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    HP_Module = module) %>%
+  left_join(hubs[["high"]] %>%
+              mutate(HP_Hub = 1,
+                     HP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, HP_Hub, HP_Unique_Hub)) %>%
+  left_join(modules[["low"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    LP_Module = module) %>%
+    left_join(hubs[["low"]] %>%
+              mutate(LP_Hub = 1,
+                     LP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, LP_Hub, LP_Unique_Hub)) %>%
+  clipr::write_clip()
+```
+
+## 11
+```{r}
+#JQA-S11 - B6 Signature Genes
+enrichInfo[["B6"]] %>%
+  left_join(fit_all$genes) %>%
+  select(-SamplesWithReads, -description) %>%
+  left_join(diffResults %>%
+              select(ensembl_gene_id,is.DE,is.DV,is.DW)) %>% 
+  dplyr::rename(
+    DE = is.DE,
+    DV = is.DV,
+    DW = is.DW
+  ) %>% 
+  left_join(modules[["high"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    HP_Module = module) %>%
+  left_join(hubs[["high"]] %>%
+              mutate(HP_Hub = 1,
+                     HP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, HP_Hub, HP_Unique_Hub)) %>%
+  left_join(modules[["low"]] %>%
+              select(ensembl_gene_id, module)) %>% 
+  dplyr::rename(
+    LP_Module = module) %>%
+    left_join(hubs[["low"]] %>%
+              mutate(LP_Hub = 1,
+                     LP_Unique_Hub = is.unique) %>%
+              select(ensembl_gene_id, LP_Hub, LP_Unique_Hub)) %>%
+  clipr::write_clip()
+```
+
+## 15/16
+```{r}
+##15 and 16 (maybe) - Inhibitory 6/18 that are also in the right modules (HP_14 and LP_I)
+#tmp_path <- "D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC #Preference/RNA211105TP_CeA/JQA_snRNAseq/GABAmarkers_jqa_final.xlsx"
+  tmp_path <- "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/GABAmarkers_jqa_final.xlsx"
+
+tmp_sheets <- openxlsx::getSheetNames(tmp_path)
+
+tmp_enrich <- lapply(openxlsx::getSheetNames(tmp_path),
+                     function(x) {
+                       read.xlsx(tmp_path,
+                                 sheet = x)
+                     }
+)
+
+names(tmp_enrich) <- paste0("Gaba_",
+                            formatC(seq_along(tmp_sheets),
+                                    format = "d", flag = "0", digits = 1))
+
+
+
+tmp_enrich <- lapply(tmp_enrich,
+                     function(x) {
+                       tmp <- left_join(x, DV %>%
+                                          dplyr::select("ensembl_gene_id","external_gene_name"),
+                                        by = c("gene" = "external_gene_name")) %>%
+                         drop_na()
+                       return(tmp)
+                     })
+
+#Inhibitory 6 in HP_14
+tmp_enrich$Gaba_06 %>% 
+  slice_max(rank, prop = 0.1) %>%
+  select(ensembl_gene_id, gene, avg_log2FC, pct.1, pct.2, abund, rank) %>%
+  left_join(
+    modules$high %>% 
+      filter(module == "HP_14") %>%
+      select(ensembl_gene_id, is.DE, is.DV, is.DW, is.unique)) %>%
+  drop_na() %>%
+  mutate(is.hub = as.numeric(ensembl_gene_id %in% (hubs$high %>%
+                                          filter(module == "HP_14") %>%
+                                          pull(ensembl_gene_id))),
+         is.enrich.marker = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_06),
+         is.exclusive = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_06_EXC)) %>% 
+  clipr::write_clip()
+
+#Inhibitory 18 in HP_14
+tmp_enrich$Gaba_18 %>% 
+  slice_max(rank, prop = 0.1) %>%
+  select(ensembl_gene_id, gene, avg_log2FC, pct.1, pct.2, abund, rank) %>%
+  left_join(
+    modules$high %>% 
+      filter(module == "HP_14") %>%
+      select(ensembl_gene_id,, is.DE, is.DV, is.DW, is.unique)) %>%
+  drop_na() %>% 
+  mutate(is.hub = as.numeric(ensembl_gene_id %in% (hubs$high %>%
+                                          filter(module == "HP_14") %>%
+                                          pull(ensembl_gene_id))),
+         is.enrich.marker = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_18),
+         is.exclusive = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_18_EXC)) %>% 
+  clipr::write_clip()
+
+
+#Inhibitory 6 in LP_I
+tmp_enrich$Gaba_06 %>% 
+  slice_max(rank, prop = 0.1) %>%
+  select(ensembl_gene_id, gene, avg_log2FC, pct.1, pct.2, abund, rank) %>%
+  left_join(
+    modules$low %>% 
+      filter(module == "LP_I") %>%
+      select(ensembl_gene_id,, is.DE, is.DV, is.DW, is.unique)) %>%
+  drop_na() %>% 
+  mutate(is.hub = as.numeric(ensembl_gene_id %in% (hubs$low %>%
+                                          filter(module == "LP_I") %>%
+                                          pull(ensembl_gene_id))),
+         is.enrich.marker = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_06),
+         is.exclusive = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_06_EXC)) %>% 
+  clipr::write_clip()
+
+#Inhibitory 18 in HP_14
+tmp_enrich$Gaba_18 %>% 
+  slice_max(rank, prop = 0.1) %>%
+  select(ensembl_gene_id, gene, avg_log2FC, pct.1, pct.2, abund, rank) %>%
+  left_join(
+    modules$low %>% 
+      filter(module == "LP_I") %>%
+      select(ensembl_gene_id,, is.DE, is.DV, is.DW, is.unique)) %>%
+  drop_na() %>% 
+  mutate(is.hub = as.numeric(ensembl_gene_id %in% (hubs$low %>%
+                                          filter(module == "LP_I") %>%
+                                          pull(ensembl_gene_id))),
+         is.enrich.marker = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_18),
+         is.exclusive = as.numeric(ensembl_gene_id %in% enrichInfo$Gaba_18_EXC)) %>% 
+  clipr::write_clip()
+
+#Overall GABA Markers
+  # tmp_path <- "D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/OVERALLmarkers_jqa_111224.xlsx"
+  tmp_path <- "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/OVERALLmarkers_jqa_111224.xlsx"
+  tmp_sheets <- c("gaba", "glut", "non")
+  
+  tmp_enrich <- lapply(tmp_sheets <- c("gaba", "glut", "non"),
+                       function(x) {
+                         read.xlsx(tmp_path,
+                                   sheet = x)
+                         }
+                       )
+
+  names(tmp_enrich) <- tmp_sheets
+
+tmp_enrich <- lapply(tmp_enrich,
+                     function(x) {
+                       tmp <- left_join(x, DV %>%
+                                          dplyr::select("ensembl_gene_id","external_gene_name"),
+                                        by = c("gene" = "external_gene_name")) %>%
+                         drop_na()
+                     })
+#GABA in HP_14
+tmp_enrich$gaba %>% 
+  slice_max(rank, prop = 0.1) %>%
+  select(ensembl_gene_id, gene, avg_log2FC, pct.1, pct.2, abund, rank) %>%
+  left_join(
+    modules$high %>% 
+      filter(module == "HP_14") %>%
+      select(ensembl_gene_id,, is.DE, is.DV, is.DW, is.unique)) %>%
+  drop_na() %>% 
+  mutate(is.hub = as.numeric(ensembl_gene_id %in% (hubs$high %>%
+                                          filter(module == "HP_14") %>%
+                                          pull(ensembl_gene_id)))) %>% 
+  clipr::write_clip()
+
+
+#GABA 6 in LP_I
+tmp_enrich$gaba %>% 
+  slice_max(rank, prop = 0.1) %>%
+  select(ensembl_gene_id, gene, avg_log2FC, pct.1, pct.2, abund, rank) %>%
+  left_join(
+    modules$low %>% 
+      filter(module == "LP_I") %>%
+      select(ensembl_gene_id,, is.DE, is.DV, is.DW, is.unique)) %>%
+  drop_na() %>% 
+  mutate(is.hub = as.numeric(ensembl_gene_id %in% (hubs$low %>%
+                                          filter(module == "LP_I") %>%
+                                          pull(ensembl_gene_id)))) %>% 
+  clipr::write_clip()
+```
+
+#17
+```{r}
+#17 - Cell type specific markers
+
+
+tmp_str <- paste0("Gaba_",
+              formatC(1:18,
+                      format = "d", flag = "0", digits = 1))
+
+tmp_markers <- lapply(paste0("Gaba_", formatC(1:18,
+                                              format = "d", flag = "0", digits = 1)),
+                      function(x) {
+                        tmp_enrich[[x]] %>%
+                          slice_max(rank, n = 100) %>%
+                          select(ensembl_gene_id, gene) %>%
+                          mutate(cluster = x, 
+                                 is.marker = as.numeric(ensembl_gene_id %in% enrichInfo[[x]]),
+                                 is.exclusive = as.numeric(ensembl_gene_id %in% enrichInfo[[paste0(x,"_EXC")]]))
+                      }
+                      
+)
+
+#18
+
+tmp <-setupEnrich_snRNA_2()
+
+tmp <- lapply(tmp, function(x) {
+  x <- left_join(x, DV %>% select(external_gene_name, ensembl_gene_id))
+  return(x$external_gene_name)
+  })
+
+max_length <- max(sapply(tmp,length))
+tmp3 <- lapply(names(tmp), function(x) {
+  j <- array("", dim = max_length)
+  j[1:length(tmp[[x]])] <- tmp[[x]]
+  return(j)
+})
+
+tmp4 <- bind_cols(tmp3)
+colnames(tmp4) <- names(tmp)
+
+tmp4 %>% clipr::write_clip()
+
+rm(max_length)
+
+70/160
+
+```
+
+

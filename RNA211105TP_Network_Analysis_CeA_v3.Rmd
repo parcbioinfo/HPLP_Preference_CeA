@@ -1,0 +1,1810 @@
+---
+title: "WGCNA WGCNA CeA HP vs LP"
+author: "Justin Anderson"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(error = 0,
+                      warning = FALSE,
+                      tidy = TRUE)
+# Default kable table
+kableDefault <- function(table, ...) {
+  knitr::kable(table, ...) %>%
+    kable_styling(full_width = T,
+                  fixed_thead = T,
+                  bootstrap_options = c("hover","striped"))
+}
+```
+
+# Intro
+
+We are attempting to make sense of some analysis decisions previously used by Dan Iancu while working with PARC. In particular we are interested in the analysis pipeline/workflow for generating and analyzing consensus networks for RNA-seq data for the high and low preference PARC lines. We will start with WGCNA, but will also delve into differential variance and differential wiring later. To do this we will be using RNA-seq data from the CeA that has been TMM normalized.
+
+v2 includes additional enrichment tests from the single-cell data, as well as renaming the modules away from colors.
+
+v3 re-scale of hard threshold for network measures (connectivity, etc)
+
+## Load libraries
+
+Load the necessary libraries
+
+```{r load libraries, message=FALSE, warning=FALSE, results=FALSE}
+#Core to analysis
+library(WGCNA)
+library(psych) #correlation test
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(plyr)
+library(tidyverse)
+library(dplyr)
+library(kableExtra)
+
+#Platform Independent Parallel
+library(future)
+#library(furrr) #parallel map
+library(future.apply) #parallel apply
+
+#Viz
+library(patchwork)
+library(ggVennDiagram)
+
+#Export
+library(openxlsx)
+```
+## Load functions
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+source("../../../JQA_WGCNA_Functions.R")
+```
+
+## Gather Data
+
+We have roughly 50 samples per gender per genotype and roughly \~15,000 genes which passed high and low threshold requirements. We begin by loading in the data from the differential expression results and splitting it into groups.
+
+```{r Load Data}
+#Load in differential expression results, including gene annotation and normalized counts
+load("../../DE_Analysis/transcriptInfoMouse105.RData")
+norm <- 
+  read_csv("../../DE_Analysis/RNA211105TP_CEA_LimmaVoom_NormalizedCounts.csv") %>%
+  column_to_rownames(var="ensembl_gene_id")
+  
+#Load in sample information, factors and naming, convert to common name and
+#filter out samples not in the dataset any longer
+sampleInfo <- read_tsv("../../DE_Analysis/RNA211105TP_sample_key.txt") %>%
+  mutate(SampleName = paste0("S",SampleName)) %>% 
+  filter(SampleName %in% colnames(norm)) %>%
+  arrange(SampleName)
+
+#Split by genotype
+samples_L <- sampleInfo %>% filter(Genotype == "LP") %>% pull(SampleName)
+samples_H <- sampleInfo %>% filter(Genotype == "HP") %>% pull(SampleName)
+norm_H <- norm[, names(norm) %in% samples_H]
+norm_L <- norm[, names(norm) %in% samples_L]
+
+transcriptInfoMouse <- 
+  transcriptInfoMouse[match(rownames(norm),
+                            transcriptInfoMouse$ensembl_gene_id), ]
+```
+
+### Drop non protein coding
+For WGCNA/DV/DW I have been asked to only consider the protein coding genes, 
+this will exclude roughly 2000 genes from our analysis
+```{r}
+transcriptInfoMouse_original <- transcriptInfoMouse
+transcriptInfoMouse <- transcriptInfoMouse %>%
+  filter(gene_biotype == "protein_coding")
+
+norm <- norm[rownames(norm) %in% transcriptInfoMouse$ensembl_gene_id, ]
+norm_H <- norm_H[rownames(norm_H) %in% transcriptInfoMouse$ensembl_gene_id, ]
+norm_L <- norm_L[rownames(norm_L) %in% transcriptInfoMouse$ensembl_gene_id, ]
+```
+
+
+# WGCNA
+## Soft threshold choices for total and selected data sets
+
+We start by using the WGCNA function *pickSoftThreshold* to determine possible 
+soft thresholding choices for different network constructions.  We will use,
+as recommended by Horvath and Langfelder, the biweight mid-correction as the
+correlation function
+```{r Thresholding plotting function}
+#Simple plot for looking at threshold, from the WGCNA tutoral, translated into ggplot, takes in the fitIndices list from the pickSoftThreshold function return
+thresholdingPlot <- function(thresholdingFit) {
+  
+  # Scale free topological model fit
+  tmp_PlotA <- ggplot(thresholdingFit) +
+    geom_text(aes(x = Power,
+                  y = SFT.R.sq,
+                  label = Power)) +
+    geom_hline(yintercept = 0.9, color = "Red") +
+    geom_hline(yintercept = 0.85, color = "Red", linetype = 2) +
+    geom_hline(yintercept = 0.8, color = "Blue") +
+    theme_classic() +
+    labs(x = "Soft Threshold Power",
+         y = "R^2" )
+  tmp_PlotB <- ggplot(thresholdingFit%>%
+  mutate(mean.k. = 10*log10(mean.k./max(mean.k.)))) +
+    geom_text(aes(x = Power,
+                  y = mean.k.,
+                  label = Power)) +
+    theme_classic() +  
+    theme(panel.grid.major.y = element_line()) +
+    labs(x = "Soft Threshold Power",
+         y = "Mean connectivity (dB)" )
+  
+  return (tmp_PlotA+tmp_PlotB)
+  }
+```
+
+```{r soft-threshold, message=FALSE, warning=FALSE, results=FALSE}
+tmpFile <- "RNA211105TP_CeA_softThreshold.RData"
+
+if (file.exists(tmpFile)) {
+  cat("Using existing thresholding data.\n")
+  load(tmpFile)
+} else {
+  powers <- c(seq(4,20,by=1));
+  plan(sequential)
+  enableWGCNAThreads(nThreads = 2)
+  
+  #From total and selected networks
+  sft_H <- pickSoftThreshold(t(norm_H), powerVector = powers,
+                             verbose = 5)
+  sft_L <- pickSoftThreshold(t(norm_L), powerVector = powers,
+                             verbose = 5)
+  sft_HL <- pickSoftThreshold(t(norm), powerVector = powers,
+                              verbose = 5)
+  disableWGCNAThreads()
+  closeAllConnections()
+  rm(powers)
+  save(sft_H, sft_L, sft_HL ,
+       file = tmpFile)
+}
+rm(tmpFile)
+```
+
+
+```{r Thresholding plots}
+thresholdingPlot(sft_H$fitIndices) +
+  plot_annotation(title = "Soft Thresholding - High preference")  
+thresholdingPlot(sft_L$fitIndices) +
+  plot_annotation(title = "Soft Thresholding - Low preference")
+thresholdingPlot(sft_HL$fitIndices) +
+  plot_annotation(title = "Soft Thresholding - Total preference")
+```
+
+Going with: 
+  High: 10
+  Low: 9
+## Drop low connectivity Genes
+We will use the thresholding above to build adjacency matrices and drop the
+lowest connectivity genes from the analysis.  Building adjacency matrices using
+all the genes takes awhile (~2GB matrices).
+
+The pmax adjacency will be used for connectivity to ensure we get genes that are
+important within either network.  This is the most conservative approach to 
+identifying connectivity.
+```{r}
+tmpFile <- "RNA211105TP_CeA_connectivity.RData"
+
+if (file.exists(tmpFile)) {
+  cat("Using existing connectivity data.\n")
+  load(tmpFile)
+} else {
+  
+  adj<-list()
+  
+  tmp_Dim <- max(dim(norm_H))
+  adj[["high"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  adj[["high"]] <- adjacency(t(norm_H),
+                             power = 1,
+                             type = "unsigned")
+  
+  tmp_Dim <- max(dim(norm_L))
+  adj[["low"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  adj[["low"]] <- adjacency(t(norm_L),
+                            power = 1,
+                            type = "unsigned")  
+  
+  adj[["high"]] <- adj[["high"]]^10
+  adj[["low"]] <- adj[["low"]]^9
+  
+   #When building these "consensus" networks we have to make sure that all of the
+  #adjacency matrices involved are comparable.. in this case we will normalize 
+  #so that the 95% quantiles are the same.  Also, remember we want the choices
+  #for soft thresholding above to be the 'minimum' numbers.  This is the process
+  #suggested by Hovarth in their book,
+  tmp_high <- quantile(as.dist(adj[["high"]]), probs = 0.95, type = 8)
+  tmp_low <- quantile(as.dist(adj[["low"]]), probs = 0.95, type = 8)
+  
+  tmp_scale <- log(tmp_high)/log(tmp_low)
+  #If the scale is less than 1 than we need to adjust male, not female, this
+  #insures that we are always (generally) staying above our R^2 fit for scale
+  #free topology.. The other direction would error in preserving more 
+  #connectivity, which for the purpose of droping genes by connectivity would
+  #probably be okay.
+  if(tmp_scale < 1) {
+    adj[["high"]] <- adj[["high"]]^(1/tmp_scale)
+  } else {
+    adj[["low"]] <- adj[["low"]]^tmp_scale
+  }
+  rm(tmp_high, tmp_low, tmp_scale)
+  
+  tmp_Dim <- nrow(adj[["low"]])
+  adj[["max"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  adj[["max"]] <- pmax(adj[["high"]], adj[["low"]])
+  
+  #Compute connectivty per gene, remove self-connectivity
+  geneConnectivity <- data.frame(connectivity = rowSums(adj[["max"]]) - 1,
+                                 ensembl_gene_id = rownames(norm_H)) %>%
+    arrange(connectivity) %>%
+    mutate(id = row_number(),
+           perc = cumsum(connectivity),
+           perc = perc / max(perc))
+  
+  save(geneConnectivity, 
+       file = tmpFile)
+  
+  rm(tmp_Dim)
+}
+```
+
+## Connectivity
+Look at the fraction of total connectivity as a function of ranked gene ID 
+and drop the lowest 1% of genes, but cap at 25% of total genes
+```{r}
+ggplot(geneConnectivity) +
+  geom_point(aes(x = id, y = perc))+
+  geom_hline(yintercept = 0.01) +
+  theme_classic() +
+  xlab("Number of Genes") +
+  ylab("Cumulative Connectivity")
+
+#Maximum drop 25% of all genes, start by droping teh lowest 1% of genes, then
+#cap
+nDropGenes <- min(which(geneConnectivity$perc > 0.01))
+nDropGenes <- min(nDropGenes, floor(nrow(norm)*25/100))
+
+dropGenes <- geneConnectivity %>%
+  filter(perc <= geneConnectivity$perc[nDropGenes]) %>% pull(ensembl_gene_id)
+
+norm_H <- norm_H[!(rownames(norm_H) %in% dropGenes), ]
+norm_L <- norm_L[!(rownames(norm_L) %in% dropGenes), ]
+norm_Original <- norm
+norm <- norm[!(rownames(norm) %in% dropGenes), ]
+```
+
+## Soft threshhold
+Soft thresholding for the high connectivity genes.
+```{r soft-threshold high-conn, message=FALSE, warning=FALSE, results=FALSE}
+tmpFile <- "RNA211105TP_CeA_softThreshold_highconn.RData"
+
+if (file.exists(tmpFile)) {
+  cat("Using existing thresholding data.\n")
+  load(tmpFile)
+} else {
+  powers <- c(seq(4,20,by=1));
+  plan(sequential)
+  enableWGCNAThreads(nThreads = 4)
+  #From total and selected networks
+  sft_H <- pickSoftThreshold(t(norm_H), powerVector = powers,
+                             verbose = 5)
+  sft_L <- pickSoftThreshold(t(norm_L), powerVector = powers,
+                             verbose = 5)
+  disableWGCNAThreads()
+  closeAllConnections()
+  save(sft_H, sft_L, 
+       file = tmpFile)
+  rm(powers)
+}
+rm(tmpFile)
+```
+
+```{r Thresholding plots high-conn}
+thresholdingPlot(sft_H$fitIndices) +
+  plot_annotation(title = "Soft Thresholding - High preference")  
+thresholdingPlot(sft_L$fitIndices) +
+  plot_annotation(title = "Soft Thresholding - Low preference")
+```
+
+```{r}
+adj <- list()
+
+tmp_Dim <- max(dim(norm_H))
+adj[["high"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+adj[["high"]] <- adjacency(t(norm_H),
+                           power = 10,
+                           type = "unsigned")
+
+tmp_Dim <- max(dim(norm_L))
+adj[["low"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+adj[["low"]] <- adjacency(t(norm_L),
+                          power = 9,
+                          type = "unsigned")  
+
+rm(tmp_Dim)
+```
+
+##Compute modules
+```{r}
+tmpFile <- "RNA211105TP_CeA_modules.RData"
+if (file.exists(tmpFile)) {
+  cat("Using existing module data.\n")
+  load(tmpFile)
+} else {
+  cat("Computing modules:\n")
+  
+  gc()
+  enableWGCNAThreads(nThreads=4)
+  
+  TOM <- list()
+  tmp_Dim <- max(dim(norm_L))
+  TOM[["low"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  TOM[["high"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  
+  TOM[["high"]]  <- TOMsimilarity(adj[["high"]])
+  TOM[["low"]]   <- TOMsimilarity(adj[["low"]])
+  
+  #See above in connectivity for description of this process  
+  tmp_high <- quantile(as.dist(TOM[["high"]]), probs = 0.95, type = 8)
+  tmp_low <- quantile(as.dist(TOM[["low"]]), probs = 0.95, type = 8)
+  
+  tmp_scale <- log(tmp_high)/log(tmp_low) 
+  #CONSENSUS: pmin
+  #The lowest adjacency of the two networks, this is often referred to as
+  #the consensus network in the WGCNA literature.  If a gene is 'unimportant' in
+  #either network, then it is effectively "discarded".. What remains are genes
+  #which are important to BOTH networks.
+  
+  #MAX: pmax
+  #The highest adjacency of the two networks.  This captures genes which are 
+  #important in EITHER network, as opposed to both (see below). This is the 
+  #measure Dan used as the 'consensus' network.. 
+  
+  #Note we could also compute the 95% quantile normalization on the adjacency
+  #matrices and construct the TOMS via the TOMsimilarity function, but since we
+  #are using TOM as our metric, this more direct approach is fine and also
+  #present in the hovarth examples.. they also suggest pmax-pmin as a first
+  #step for exploring differential co-expression (see: 174 in the book)
+  TOM[["consensus"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  TOM[["max"]] <- matrix(as.double(0), tmp_Dim, tmp_Dim)
+  if(tmp_scale < 1) {
+    TOM[["consensus"]] <- pmin(TOM[["high"]]^(1/tmp_scale), TOM[["low"]])
+    TOM[["max"]]       <- pmax(TOM[["high"]]^(1/tmp_scale), TOM[["low"]])
+    TOM
+  } else {
+    TOM[["consensus"]] <- pmin(TOM[["high"]], TOM[["low"]]^tmp_scale)
+    TOM[["max"]]       <- pmax(TOM[["high"]], TOM[["low"]]^tmp_scale)
+  }
+  
+  TOM[["diff"]] <- (TOM[["max"]] - TOM[["consensus"]])
+  
+  rm(tmp_high, tmp_low, tmp_scale, tmp_Dim)
+  disableWGCNAThreads()
+  closeAllConnections()
+  
+  tree <- list();
+  for (tom in names(TOM)) {
+    tree[[tom]] <- hclust(as.dist(1-TOM[[tom]]), method = "average");
+  }#end for
+  
+  #Compute networks
+  modules <- list()
+  for (module in names(tree)) {
+    modules[[module]] <- cutreeDynamic(dendro = tree[[module]], distM=1-TOM[[module]],
+                                       cutHeight = 0.9999,
+                                       minClusterSize = 100,
+                                       deepSplit = 4,
+                                       maxCoreScatter = NULL, minGap = NULL,
+                                       maxAbsCoreScatter = NULL, minAbsGap = NULL,
+                                       pamStage = TRUE, pamRespectsDendro = F,
+                                       useMedoids = FALSE,  respectSmallClusters = TRUE,
+                                       verbose = 2, indent = 0)
+  } #end for
+
+  #Convert to colors
+  for (module in names(tree)) {
+    modules[[module]] <- data.frame(ensembl_gene_id = rownames(norm_H),
+                                module = labels2colors(modules[[module]]))
+  } #end for
+  #Number of modules
+  sapply(modules, function(x) n_distinct(x$module))
+  
+  save(modules, tree, 
+       file = tmpFile)
+  gc()
+  rm(tom, module)
+} #end if
+rm(tmpFile)
+```
+
+### Rename modules
+This only happens once, but we are renaming the modules - I did this on 4/4/24
+```{r}
+if(FALSE) {
+  #HP network
+  tmp_rename <- data_frame(module_orig = unique(modules[["high"]]$module)) %>%
+    mutate(module = paste0("HP_",row_number()))
+  
+  modules[["high"]] <- modules[["high"]] %>%
+    rename(module_orig = module) %>%
+    left_join(tmp_rename)
+  
+  #LP network
+  rm(tmp_rename)
+  tmp_rename <- data_frame(module_orig = unique(modules[["low"]]$module)) %>%
+    mutate(module = paste0("LP_",LETTERS[row_number()]))
+  
+  modules[["low"]] <- modules[["low"]] %>%
+    rename(module_orig = module) %>%
+    left_join(tmp_rename)
+  
+  tmpFile <- "RNA211105TP_CeA_modules.RData"
+    save(modules, tree, 
+       file = tmpFile)
+    
+  rm(tmpFile, tmp_rename)
+}
+```
+
+
+
+```{r}
+  plot(tree[["high"]], xlab="", sub="", main = "TOM - High Pref. Network",
+       labels = FALSE, hang = 0.04);
+  plot(tree[["low"]], xlab="", sub="", main = "TOM - Low Pref. Network",
+       labels = FALSE, hang = 0.04);
+  plot(tree[["consensus"]], xlab="", sub="", main = "TOM - Consen. Network",
+       labels = FALSE, hang = 0.04);
+  plot(tree[["max"]], xlab="", sub="", main = "TOM - Max Network",
+       labels = FALSE, hang = 0.04);
+  plot(tree[["diff"]], xlab="", sub="", main = "TOM - Diff Network",
+       labels = FALSE, hang = 0.04);
+
+
+plotDendroAndColors(tree[["low"]], modules[["low"]][,"module"], "Dynamic Tree Cut",
+                    dendroLabels = FALSE, hang = 0.03,
+                    addGuide = TRUE, guideHang = 0.05)
+```
+
+
+# Differential Analysis
+Here we compute the differential Variability, wiring and bring in differential 
+expression data from the DE pipeline.
+
+## Differential Variability
+Use a leveneTest to compare the variance between two groups using normalized
+sequencing counts. Test is on gene-level.
+### Function
+
+```{r}
+tmpFile <- "RNA211105TP_CeA_DVDWDE.RData"
+if (file.exists(tmpFile)) {
+  load(tmpFile)
+  rm(tmpFile)
+}
+
+```
+
+### Analysis
+```{r}
+if (!exists("DV")) {
+  plan(multisession, workers = 2)
+  
+  #Only highly connective protein coding genes
+  DV <- diffVariability(norm,
+                        sampleInfo$Genotype,
+                        transcriptInfoMouse %>%
+                          filter(!(ensembl_gene_id %in% dropGenes)))
+  plan(sequential)
+                      
+  }#end if
+```
+
+## Differential Wiring
+
+### Analysis
+```{r}
+if (!exists("DW")) {
+  tmp_H <- adjacency(t(norm_H),
+                     power = 1,
+                     type = "unsigned")
+  
+  tmp_L <- adjacency(t(norm_L),
+                     power = 1,
+                     type = "unsigned")  
+  
+  #It takes more time to setup the parallel environment than to just run without
+  #since the variables here are ~2G
+  #plan(multisession, workers = 2)
+  plan(sequential)
+
+  DW <- diffWiring(tmp_H, tmp_L, ncol(norm_H), ncol(norm_L),
+                   geneInfo = transcriptInfoMouse %>% 
+                          filter(!(ensembl_gene_id %in% dropGenes)),
+                   pThresh = 0.05,
+                   deltaThresh = 0.55)
+  rm(tmp_H, tmp_L)
+}
+```
+
+
+## Differential Expression
+This is DE results from the limma+voom pipeline (TMM, CPM, Voom normalized) data
+We want HP vs LP data for now.
+
+### Read in Data
+```{r}
+if (!exists("DE")) {
+DE <- 
+  read_csv("../../DE_Analysis/RNA211105TP_CEA_LimmaVoom_DE_HPvLP_Both.csv")
+}
+```
+
+## Analysis
+```{r}
+if (!exists("diffResults")) {
+#Let's start by combining the results
+fdrThresh <- 0.05
+DE$is.DE <- as.numeric(DE$adj.P.Val < fdrThresh)
+DE$p.adj <- DE$adj.P.Val
+DE <- DE %>% replace_na(list(external_gene_name = ""))
+#We have the fdr threshold as 2x the DE one, here
+DV$is.DV <-  as.numeric(DV$p.adj < fdrThresh)
+DW$is.DW <-  as.numeric(DW$p.adj < fdrThresh)
+
+#Combine all the results
+diffResults <- DE %>% select(ensembl_gene_id, external_gene_name,
+                             p.adj, logFC, is.DE) %>%
+  left_join(DV %>% select(-p),
+            by = c("ensembl_gene_id","external_gene_name"),
+            suffix = c(".DE", ".DV")) %>%
+  left_join(DW %>% select(-c(p, n, genes)),
+            by = c("ensembl_gene_id","external_gene_name")) %>%
+  rename(p.adj.DW = p.adj,
+         logFC.DW = logFC) %>%
+  select(-c("HP", "LP", "corrA", "corrB"))
+
+diffResults <- diffResults %>% replace_na(list(is.DE = 0,
+                                               is.DV = 0,
+                                               is.DW = 0,
+                                               p.adj.DE = 1,
+                                               p.adj.DV = 1,
+                                               p.adj.DW = 1,
+                                               logFC.DE = 0,
+                                               logFC.DV = 0,
+                                               logFC.DW = 0))
+
+diffResults %>%
+  select(starts_with("is")) %>%
+  colSums %>% kableDefault(caption = "Differential Summary:")
+
+save(DW, DV, DE, diffResults, file = tmpFile)
+rm(tmpFile)
+}
+```
+
+# Hub Gene Analysis
+Comparison of hub genes
+We will look at the top 20% of genes from each module by intramodular 
+connectivity
+
+## Core Analysis Network
+```{r}
+IMCs <- list()
+hubs <- list()
+modules_summary <- list()
+hubs_summary <- list()
+module_eigengenes <- list()
+```
+
+### Build up enrichment lists
+```{r}
+setupEnrich_HSCC_Founders <- function() {
+  
+
+  tmp_file <-   "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Founders/RNA211012TP/github/Other_DE_Results/HSCC_Founders_Signature_Genes.xlsx"
+  tmp_enrichSets <- list()
+  tmp_enrichSets[["B6"]] <- readxl::read_xlsx(
+    tmp_file,
+    sheet = 1
+  )$Ensembl_ID
+  tmp_enrichSets[["PWK"]] <- readxl::read_xlsx(
+    tmp_file ,
+    sheet = 2
+  )$Ensembl_ID
+  
+  return(lapply(tmp_enrichSets, function(x) data_frame(ensembl_gene_id = x)))
+}
+
+setupEnrich_snRNA <- function() {
+  
+  #The first thing we do is build up the snRNA_seq annotation
+  #Read in the csv
+  snRNA_anno <- read_csv("D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/snRNAseq/Cluster_Cell_Counts.csv")
+  
+  #Transform the data, and grab sex and strain info from the sample name
+  snRNA_anno <- snRNA_anno %>%
+    column_to_rownames(var = "Cell_Cluster_ID") %>%
+    t() %>% as.data.frame %>%
+    rownames_to_column(var = "SampleID") %>%
+    mutate(Sex = str_sub(SampleID, 5,5),
+           Strain = paste0(str_sub(SampleID,1,1), "P"))
+  #Grab total cell counts by mouse
+  snRNA_anno <- snRNA_anno %>%
+    rowwise() %>%
+    mutate(Total = sum(c_across(where(is.numeric)))) %>%
+    ungroup()
+  
+  #Now we get the snRNA expression data
+  #First we grab the top 3 rows, which have tiers of cluster classification from Rita.
+  #We will add this to the annotation later.
+  tmp_filename <- "D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/snRNAseq/WNN_coarser clustering.csv"
+  
+  snRNA_clusters <- read_csv(
+    tmp_filename,
+    col_names = F,
+    n_max = 3,
+    col_select = seq(1,196,13)
+  )
+  
+  snRNA_clusters <- snRNA_clusters %>% t()
+  
+  #We have three tiers of cluster classification from Rita
+  colnames(snRNA_clusters) <- c("Coarse", "Fine", "Finer")
+  rownames(snRNA_clusters) <- NULL
+  
+  #This grabs the expression data for each of the 16 clusters, which are on the same excel sheet.
+  snRNA_expression <- 
+    seq(1,196,13) %>%
+    sapply(
+      function(x) {
+        tmp_cols <- ((0:11)+x)
+        read_csv(
+          tmp_filename,
+          col_names = F,
+          col_select = tmp_cols,
+          skip = 4
+        )
+      }, simplify = F
+    )
+  
+  #Recover column names for the expression data  
+  tmp_colnames <- read_csv(tmp_filename,
+                           col_names = F,
+                           col_select = 1:12,
+                           n_max = 1,
+                           skip = 3)
+  tmp_colnames <- as.character(tmp_colnames)
+  
+  snRNA_expression <- map(snRNA_expression,
+                          function(x) {
+                            colnames(x) <- tmp_colnames
+                            return(x)
+                          })
+  #Add in cluster ID to the list
+  names(snRNA_expression) <- as.character(1:16)
+
+  #Update the annotation with counts, etc, label names
+  tmp_Anno <- bind_cols(
+    snRNA_anno %>%
+      group_by(Strain,Sex) %>%
+      select(-Total) %>%
+      summarise(across(where(is.numeric), sum)) %>%
+      ungroup %>%
+      mutate(name = paste0("N_Cells_",Strain,"_", Sex)) %>%
+      select(-Strain, - Sex) %>% 
+      column_to_rownames(var = "name") %>%
+      t %>% as.data.frame %>%
+      mutate(N_Cells_HP = N_Cells_HP_F + N_Cells_HP_M,
+             N_Cells_LP = N_Cells_LP_F + N_Cells_LP_M) %>%
+      select(N_Cells_HP, N_Cells_HP_M, N_Cells_HP_F,
+             N_Cells_LP, N_Cells_LP_M, N_Cells_LP_F),
+    snRNA_anno %>%
+      select(-Total) %>%
+      mutate(across(where(is.numeric), function(x) {x != 0})) %>%
+      group_by(Strain,Sex) %>%
+      summarise(across(where(is.logical), sum)) %>%
+      ungroup() %>%
+      mutate(name = paste0(Strain,"_", Sex)) %>%
+      select(-Strain,-Sex) %>% 
+      column_to_rownames(var = "name") %>%
+      t %>% as.data.frame %>%
+      mutate(HP = HP_F + HP_M,
+             LP = LP_F + LP_M) %>%
+      select(HP, HP_M, HP_F,
+             LP, LP_M, LP_F))
+  
+  snRNA_clusters <- bind_cols(snRNA_clusters, tmp_Anno)
+  snRNA_clusters$Coarse_Cluster <- c(1,1,1,1,1,2,3,3,4,4,5,6,7,8,9,10)
+  snRNA_clusters$ID <- 1:16
+  snRNA_clusters$name <-  c("Neu_Inh 1", "Neu_Inh 2", "Neu_Inh 3", "Neu_Inh 4", "Neu_Inh 5", "Neu_Inh 6", "Neu_Exc 1", "Neu_Exc 2", "Neu_Exc 3", "Neu_Exc 4", "Neu_Exc 5", "Astrocytes", "Microglia", "Oligo pre", "Oligod", "Epithelial")
+  
+  #Now we build up the cluster markers
+  tmp_enrich <- lapply(snRNA_expression,
+                       function(x) {
+                         x %>% slice_max(RNA.logFC, n = 500) %>%
+                           select(gene) %>%
+                           rename(external_gene_name = gene)
+                       })
+  
+  #We also want to make sure we grab the cluster identifiers..
+  tmp_classifiers <- snRNA_clusters %>%
+    rowwise() %>%
+    mutate(test = paste(Coarse, Fine, Finer, collapse = "_"),
+           test = str_split(test, "_")) %>%
+    ungroup()
+  
+  
+  #Since tmp_enrich is ordered we should probably throw the cluster classifers on top
+  tmp_enrich <-
+    1:length(tmp_enrich) %>%
+    lapply(function(x) {
+      tmp_enrich[[x]] <- bind_rows(data_frame(external_gene_name = tmp_classifiers[[x, "test"]][[1]]),
+                                   tmp_enrich[[x]])
+    })
+  
+  #Grab the corresponding ensembl_gene_ids
+  tmp_enrich <-
+    lapply(tmp_enrich, function(x) {
+      x %>%
+        left_join(transcriptInfoMouse_original %>%
+                    select(external_gene_name, ensembl_gene_id, description)) %>%
+        filter(!is.na(ensembl_gene_id)) %>%
+        mutate(rank = row_number())
+    })
+  
+  #The default 100 markers for each cluster
+  snRNA_enrich <- tmp_enrich %>%
+    lapply(function(x) {x[seq_len(100), ]$ensembl_gene_id})
+  
+  names(snRNA_enrich) <- snRNA_clusters$name
+  
+  #Inh Exc markers
+  snRNA_enrich[["Inh"]] <- unique(unlist(snRNA_enrich[1:6]))
+  snRNA_enrich[["Exc"]] <- tmp_Exc <- unique(unlist(snRNA_enrich[7:11]))
+  
+  #Unique Inh Exc
+  snRNA_enrich[["Inh_unique"]] <- snRNA_enrich[["Inh"]][!(snRNA_enrich[["Inh"]] %in% snRNA_enrich[["Exc"]])]
+  snRNA_enrich[["Exc_unique"]] <- snRNA_enrich[["Exc"]][!(snRNA_enrich[["Exc"]] %in% snRNA_enrich[["Inh"]])]
+  
+  tmp_enrich_i <- tmp_enrich %>%
+    lapply(function(x) {x[seq_len(200), ]$ensembl_gene_id})
+  
+  tmp_Inh <- (1:6) %>% lapply(function(x) {
+    tmp_enrich_i[[x]][!(tmp_enrich_i[[x]] %in% unique(unlist(tmp_enrich_i[c(1:6)[-x]])))]})
+  
+  names(tmp_Inh) <- paste0(snRNA_clusters[1:6, ]$name, "_intra")
+  
+  tmp_Exc <- (7:11) %>% lapply(function(x) {
+    tmp_enrich_i[[x]][!(tmp_enrich_i[[x]] %in% unique(unlist(tmp_enrich_i[c(7:11)[-(x-6)]])))]})
+  names(tmp_Exc) <- paste0(snRNA_clusters[7:11, ]$name, "_intra")
+  
+  tmp_Neur <- (1:11) %>% lapply(function(x) {
+    tmp_enrich_i[[x]][!(tmp_enrich_i[[x]] %in% unique(unlist(tmp_enrich_i[c(1:11)[-x]])))]})
+  names(tmp_Neur) <- paste0(snRNA_clusters[1:11, ]$name, "_extra")
+  
+  snRNA_enrich <- c(snRNA_enrich,
+                    tmp_Inh,
+                    tmp_Exc,
+                    tmp_Neur)
+  
+  return(lapply(snRNA_enrich, function(x) data_frame(ensembl_gene_id = x))) 
+
+}
+
+setupEnrich_snRNA_2 <- function() {
+  
+  
+  #GABA
+  tmp_path <- "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/GABAmarkers_jqa_final.xlsx"
+  tmp_sheets <- openxlsx::getSheetNames(tmp_path)
+  
+  tmp_enrich <- lapply(openxlsx::getSheetNames(tmp_path),
+                       function(x) {
+                         read.xlsx(tmp_path,
+                                   sheet = x)
+                         }
+                       )
+
+  names(tmp_enrich) <- paste0("Gaba_",
+                              formatC(seq_along(tmp_sheets),
+                                      format = "d", flag = "0", digits = 1))
+  
+  #Positive markers
+  tmp_enrich2 <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_max(rank, n = 100) %>%
+                           filter(rank > 2.7) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster")
+  
+  ## Allow for genes to appear in at most 2 clusters
+  tmp_enrich3 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n <= 2 ) %>%
+    select(cluster, ensembl_gene_id)
+  
+  tmp_enrich3 <- split(tmp_enrich3 %>%
+                         select(ensembl_gene_id), tmp_enrich3$cluster)
+  
+  ## Allow for no duplicates
+  tmp_enrich4 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n == 1 ) %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_EXC"))
+  
+  tmp_enrich4 <- split(tmp_enrich4 %>%
+                         select(ensembl_gene_id), tmp_enrich4$cluster)
+  
+  #Negative markers
+   tmp_enrich <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_min(rank, n = 50) %>%
+                           filter(rank < -1.8) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster") %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_NO"))
+  
+  tmp_enrich <- split(tmp_enrich %>% 
+                        select(ensembl_gene_id), tmp_enrich$cluster)
+  
+  tmp_gaba <- c(tmp_enrich, tmp_enrich3, tmp_enrich4)
+  
+  #glut
+  tmp_path <- "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/GLUTmarkers_jqa_final.xlsx"
+  tmp_sheets <- openxlsx::getSheetNames(tmp_path)
+  
+  tmp_enrich <- lapply(openxlsx::getSheetNames(tmp_path),
+                       function(x) {
+                         read.xlsx(tmp_path,
+                                   sheet = x)
+                         }
+                       )
+
+  names(tmp_enrich) <- paste0("Glut_",
+                              formatC(seq_along(tmp_sheets),
+                                      format = "d", flag = "0", digits = 1))
+  
+  #Positive markers
+  tmp_enrich2 <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_max(rank, n = 100) %>%
+                           filter(rank > 2.7) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster")
+  
+  ## Allow for genes to appear in at most 2 clusters
+  tmp_enrich3 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n <= 2 ) %>%
+    select(cluster, ensembl_gene_id)
+  
+  tmp_enrich3 <- split(tmp_enrich3 %>%
+                         select(ensembl_gene_id), tmp_enrich3$cluster)
+  
+  ## Allow for no duplicates
+  tmp_enrich4 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n == 1 ) %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_EXC"))
+  
+  tmp_enrich4 <- split(tmp_enrich4 %>%
+                         select(ensembl_gene_id), tmp_enrich4$cluster)
+  
+  #Negative markers
+   tmp_enrich <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_min(rank, n = 50) %>%
+                           filter(rank < -1.8) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster") %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_NO"))
+  
+  tmp_enrich <- split(tmp_enrich %>% 
+                        select(ensembl_gene_id), tmp_enrich$cluster)
+  
+  tmp_glut <- c(tmp_enrich, tmp_enrich3, tmp_enrich4)
+  
+ #non
+  tmp_path <- "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/NONmarkers_jqa_final.xlsx"
+  tmp_sheets <- openxlsx::getSheetNames(tmp_path)
+  
+  tmp_enrich <- lapply(openxlsx::getSheetNames(tmp_path),
+                       function(x) {
+                         read.xlsx(tmp_path,
+                                   sheet = x)
+                         }
+                       )
+
+  names(tmp_enrich) <- c("Olig",
+                         "Microglia",
+                         "Astrocyte",
+                         "OPC")
+  
+  #Positive markers
+  tmp_enrich2 <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_max(rank, n = 100) %>%
+                           filter(rank > 2.7) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster")
+  
+  ## Allow for genes to appear in at most 2 clusters
+  tmp_enrich3 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n <= 2 ) %>%
+    select(cluster, ensembl_gene_id)
+  
+  tmp_enrich3 <- split(tmp_enrich3 %>%
+                         select(ensembl_gene_id), tmp_enrich3$cluster)
+  
+  ## Allow for no duplicates
+  tmp_enrich4 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n == 1 ) %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_EXC"))
+  
+  tmp_enrich4 <- split(tmp_enrich4 %>%
+                         select(ensembl_gene_id), tmp_enrich4$cluster)
+  
+  #Negative markers
+   tmp_enrich <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_min(rank, n = 50) %>%
+                           filter(rank < -1.8) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster") %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_NO"))
+  
+  tmp_enrich <- split(tmp_enrich %>% 
+                        select(ensembl_gene_id), tmp_enrich$cluster)
+  
+  tmp_non <- c(tmp_enrich, tmp_enrich3, tmp_enrich4)
+  
+#overall
+  tmp_path <- "C:/Users/jasor/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/OVERALLmarkers_jqa_111324.xlsx"
+  tmp_sheets <- c("gaba", "glut", "non")
+  
+  tmp_enrich <- lapply(tmp_sheets <- c("gaba", "glut", "non"),
+                       function(x) {
+                         read.xlsx(tmp_path,
+                                   sheet = x)
+                         }
+                       )
+
+  names(tmp_enrich) <- tmp_sheets
+  
+  #Positive markers
+  tmp_enrich2 <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_max(rank, n = 100) %>%
+                           filter(rank > 2.7) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster")
+  
+  ## Allow for genes to appear in at most 2 clusters
+  tmp_enrich3 <- tmp_enrich2 %>% 
+    left_join(tmp_enrich2 %>% count(ensembl_gene_id)) %>%
+    dplyr::filter( n <= 2 ) %>%
+    select(cluster, ensembl_gene_id)
+  
+  tmp_enrich3 <- split(tmp_enrich3 %>%
+                         select(ensembl_gene_id), tmp_enrich3$cluster)
+  
+  #Negative markers
+   tmp_enrich <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                     dplyr::select("ensembl_gene_id","external_gene_name"),
+                                   by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_min(rank, n = 50) %>%
+                           filter(rank < -1.8) #Limit to 90th percentile average
+                       }) %>% 
+    bind_rows(.id = "cluster") %>%
+    select(cluster, ensembl_gene_id) %>%
+     mutate(cluster = paste0(cluster, "_NO"))
+  
+  tmp_enrich <- split(tmp_enrich %>% 
+                        select(ensembl_gene_id), tmp_enrich$cluster)
+  
+  tmp_overall <- c(tmp_enrich, tmp_enrich3)
+  
+      
+  return(c(tmp_gaba, tmp_glut, tmp_non, tmp_overall))
+  
+  }
+
+setupEnrich_snRNA_3 <- function() {
+  
+  tmp_path <- "D:/work/OneDrive - Oregon Health & Science University/PARC/HSCC Preference/RNA211105TP_CeA/JQA_snRNAseq/treemarkers_jqa_110524.xlsx"
+  
+  
+  tmp_enrich <- lapply(openxlsx::getSheetNames(tmp_path),
+                       function(x) {
+                         read.xlsx(tmp_path,
+                                   sheet = x)
+                       }
+  )
+  
+  names(tmp_enrich) <- paste0("Tree_", openxlsx::getSheetNames(tmp_path))
+  
+  #Positive markers
+  tmp_enrich2 <- lapply(tmp_enrich,
+                        function(x) {
+                          tmp <- left_join(x, DV %>%
+                                             dplyr::select("ensembl_gene_id","external_gene_name"),
+                                           by = c("gene" = "external_gene_name")) %>%
+                            drop_na() %>%
+                            slice_max(rank, n = 100) %>%
+                            filter(rank > 0)
+                        }) %>% 
+    bind_rows(.id = "cluster") %>%
+    mutate(cluster = paste0(cluster, "_LEFT"))
+  
+  
+  tmp_enrich2 <- split(tmp_enrich2 %>%
+                         select(ensembl_gene_id), tmp_enrich2$cluster)
+  
+  #Negative markers
+  tmp_enrich <- lapply(tmp_enrich,
+                       function(x) {
+                         tmp <- left_join(x, DV %>%
+                                            dplyr::select("ensembl_gene_id","external_gene_name"),
+                                          by = c("gene" = "external_gene_name")) %>%
+                           drop_na() %>%
+                           slice_max(neg_rank, n = 100) %>%
+                           filter(neg_rank > 0)
+                       }) %>% 
+    bind_rows(.id = "cluster") %>%
+    select(cluster, ensembl_gene_id) %>%
+    mutate(cluster = paste0(cluster, "_RIGHT"))
+  
+  tmp_enrich <- split(tmp_enrich %>% 
+                        select(ensembl_gene_id), tmp_enrich$cluster)
+  
+  return(c(tmp_enrich, tmp_enrich2))
+  
+}
+
+```
+
+```{r}
+  if (!exists("enrichInfo")) {
+    #This is our standard WGCNA enrichment set
+    enrichInfo <- c(
+      setupEnrich(),
+      setupEnrich_HSCC_Founders(),
+      setupEnrich_snRNA_2()
+    )
+  }
+
+enrichInfo_orig <- enrichInfo
+
+enrichInfo <- lapply(enrichInfo, function(x) x$ensembl_gene_id)
+```
+
+### build consensus and max networks
+```{r}
+
+  tmp_high <- quantile(as.dist(adj[["high"]]), probs = 0.95, type = 8)
+  tmp_low <- quantile(as.dist(adj[["low"]]), probs = 0.95, type = 8)
+  tmp_scale <- log(tmp_high)/log(tmp_low)
+  
+  cat("The scaling factor is: ",tmp_scale, ".\n")
+  
+  if(tmp_scale < 1) {
+    adj[["consensus"]] <- pmin(adj[["low"]], adj[["high"]]^(1/tmp_scale))
+    adj[["max"]] <- pmax(adj[["low"]], adj[["high"]]^(1/tmp_scale))
+    adj[["high_scaled"]] <- adj[["high"]]^(1/tmp_scale)
+  } else {
+    adj[["consensus"]] <- pmin(adj[["low"]]^tmp_scale, adj[["high"]])
+    adj[["max"]] <- pmax(adj[["low"]]^tmp_scale, adj[["high"]])
+    adj[["low_scaled"]] <- adj[["high"]]^(1/tmp_scale)
+  }
+  
+  adj[["diff"]] <- adj[["max"]] - adj[["consensus"]]
+ 
+
+  adj[["low_10"]] <- adjacency(t(norm_L),
+                          power = 10,
+                          type = "unsigned")
+  
+  rm(tmp_high, tmp_low, tmp_scale)
+```
+
+### Core
+```{r}
+for(tmp_network in names(modules)) {
+  
+  tmp_network <- "consensus"
+  cat("Working on the", tmp_network, "network.\n")
+  tmp_time <- Sys.time()
+  tmp_result <- coreNetworkAnalysis(tmp_network)
+  Sys.time()-tmp_time
+  
+  IMCs[[tmp_network]] <- tmp_result$IMC
+  hubs[[tmp_network]] <- tmp_result$hub
+  modules[[tmp_network]] <- tmp_result$module
+  modules_summary[[tmp_network]] <- tmp_result$module_summary
+  hubs_summary[[tmp_network]] <- tmp_result$hub_summary
+  module_eigengenes[[tmp_network]] <- tmp_result$eigenGenes
+  
+  cat(tmp_network, "network done.(", format(Sys.time()-tmp_time),")\n")
+  rm(tmp_result, tmp_time)
+  
+}
+rm(tmp_network)
+```
+
+JQA 7/8/13: Looking at network measures for the LP network using scaled adjacencies, we do this first, 
+before we add all the additional annotation/etc to the low module
+```{r}
+  tmp_network<- "low_10"
+  cat("Working on the", tmp_network, "network.\n")
+  tmp_time <- Sys.time()
+  tmp_result <- coreNetworkAnalysis("low", scaled_adj = "low_10")
+  Sys.time()-tmp_time
+  
+  IMCs[[tmp_network]] <- tmp_result$IMC
+  hubs[[tmp_network]] <- tmp_result$hub
+  modules[[tmp_network]] <- tmp_result$module
+  modules_summary[[tmp_network]] <- tmp_result$module_summary
+  hubs_summary[[tmp_network]] <- tmp_result$hub_summary
+  module_eigengenes[[tmp_network]] <- tmp_result$eigenGenes
+  
+  cat(tmp_network, "network done.(", format(Sys.time()-tmp_time),")\n")
+  rm(tmp_result, tmp_time)
+  
+  tmp_network<- "low_scaled"
+  cat("Working on the", tmp_network, "network.\n")
+  tmp_time <- Sys.time()
+  tmp_result <- coreNetworkAnalysis("low", scaled_adj = "low_scaled")
+  Sys.time()-tmp_time
+  
+  IMCs[[tmp_network]] <- tmp_result$IMC
+  hubs[[tmp_network]] <- tmp_result$hub
+  modules[[tmp_network]] <- tmp_result$module
+  modules_summary[[tmp_network]] <- tmp_result$module_summary
+  hubs_summary[[tmp_network]] <- tmp_result$hub_summary
+  module_eigengenes[[tmp_network]] <- tmp_result$eigenGenes
+  
+  cat(tmp_network, "network done.(", format(Sys.time()-tmp_time),")\n")
+  rm(tmp_result, tmp_time)
+```
+
+
+## Differential Hub Analysis
+We want to explore:
+  Hubs in H but L
+  Hubs in L but H
+  Hubs in H but not consensus
+  Hubs in L but not consensus
+```{r}
+unique_hubs <- list()
+
+unique_hubs[["high"]] <- 
+  hubs[["high"]][!(hubs[["high"]]$ensembl_gene_id %in%
+                                     hubs[["low"]]$ensembl_gene_id), ]
+unique_hubs[["high_consensus"]] <- 
+  hubs[["high"]][!(hubs[["high"]]$ensembl_gene_id %in%
+                                     hubs[["consensus"]]$ensembl_gene_id), ]
+unique_hubs[["low"]] <- 
+  hubs[["low"]][!(hubs[["low"]]$ensembl_gene_id %in%
+                                     hubs[["high"]]$ensembl_gene_id), ]
+unique_hubs[["low_consensus"]] <- 
+  hubs[["low"]][!(hubs[["low"]]$ensembl_gene_id %in%
+                                     hubs[["consensus"]]$ensembl_gene_id), ]
+#Add into unique info to module data
+modules[["high"]] %<>% 
+  left_join(unique_hubs[["high"]] %>% 
+              mutate(is.unique = 1) %>%
+              select(ensembl_gene_id, module, is.unique),
+            by = c("ensembl_gene_id", "module")) %>%
+  left_join(unique_hubs[["high_consensus"]] %>% 
+              mutate(is.unique.consensus = 1) %>%
+              select(ensembl_gene_id, module, is.unique.consensus),
+            by = c("ensembl_gene_id", "module"))
+
+modules[["high"]] %<>% replace_na(list(is.unique = 0,
+                                       is.unique.consensus = 0))
+modules[["low"]] %<>% 
+  left_join(unique_hubs[["low"]] %>% 
+              mutate(is.unique = 1) %>%
+              select(ensembl_gene_id, module, is.unique),
+            by = c("ensembl_gene_id", "module")) %>%
+  left_join(unique_hubs[["low_consensus"]] %>% 
+              mutate(is.unique.consensus = 1) %>%
+              select(ensembl_gene_id, module, is.unique.consensus),
+            by = c("ensembl_gene_id", "module"))
+
+modules[["low"]] %<>% replace_na(list(is.unique = 0,
+                                       is.unique.consensus = 0))
+hubs[["high"]] %<>% 
+  left_join(unique_hubs[["high"]] %>% 
+              mutate(is.unique = 1) %>%
+              select(ensembl_gene_id, module, is.unique),
+            by = c("ensembl_gene_id", "module")) %>%
+  left_join(unique_hubs[["high_consensus"]] %>% 
+              mutate(is.unique.consensus = 1) %>%
+              select(ensembl_gene_id, module, is.unique.consensus),
+            by = c("ensembl_gene_id", "module"))
+
+hubs[["high"]] %<>% replace_na(list(is.unique = 0,
+                                       is.unique.consensus = 0))
+hubs[["low"]] %<>% 
+  left_join(unique_hubs[["low"]] %>% 
+              mutate(is.unique = 1) %>%
+              select(ensembl_gene_id, module, is.unique),
+            by = c("ensembl_gene_id", "module")) %>%
+  left_join(unique_hubs[["low_consensus"]] %>% 
+              mutate(is.unique.consensus = 1) %>%
+              select(ensembl_gene_id, module, is.unique.consensus),
+            by = c("ensembl_gene_id", "module"))
+
+hubs[["low"]] %<>% replace_na(list(is.unique = 0,
+                                       is.unique.consensus = 0))
+
+```
+
+### Module enrichment by unique hubs
+Add unique hub enrichment to the network summaries
+```{r}
+# Modules
+tmp_enrichment <- modules %>% sapply(
+  function(network) {
+    unique(network$module) %>% sapply(
+      function(module) {
+        unique_hubs %>% sapply(
+          function(hub_network) {
+            fisher.test(network$module == module,
+                        network$ensembl_gene_id %in% hub_network$ensembl_gene_id,
+                        alternative = "g")$p.value
+          }
+        )
+      }
+    ) %>%
+      as.data.frame %>%
+      t
+  }
+)
+
+tmp_enrichment <- tmp_enrichment %>% 
+  map(as.data.frame) %>%
+  map(rownames_to_column, var = "module")
+
+modules_summary <- names(tmp_enrichment) %>%
+  set_names(., .) %>%
+  lapply(function(x) {
+    left_join(modules_summary[[x]], tmp_enrichment[[x]])
+  })
+
+rm(tmp_enrichment)
+
+# Hubs
+tmp_enrichment <- hubs %>% sapply(
+  function(network) {
+    unique(network$module) %>% sapply(
+      function(module) {
+        unique_hubs %>% sapply(
+          function(hub_network) {
+            fisher.test(factor(network$module == module, levels = c(T, F)),
+                        factor(network$ensembl_gene_id %in% hub_network$ensembl_gene_id,
+                               levels = c(T, F)),
+                        alternative = "g")$p.value
+          }
+        )
+      }
+    ) %>%
+      as.data.frame %>%
+      t
+  }
+)
+
+tmp_enrichment <- tmp_enrichment %>% 
+  map(as.data.frame) %>%
+  map(rownames_to_column, var = "module")
+
+hubs_summary <- names(tmp_enrichment) %>%
+  set_names(., .) %>%
+  lapply(function(x) {
+    left_join(hubs_summary[[x]], tmp_enrichment[[x]])
+  })
+
+rm(tmp_enrichment)
+```
+
+
+
+## Network preservation
+This is a network used by Dan to evaluate changes in connectivity between the 
+low and high networks.  The pmax network contains all edges important in EITHER
+the low or high networks, so provides a 'common' set of modules.
+```{r}
+#Evaluate connectivity using the pmax colors on the high network and low
+#network individually, then shows up how the 
+IMCs[["high_max"]] <- intramodularConnectivity(adjMat = adj[["high"]],
+                               colors = modules[["max"]]$module,
+                               scaleByMax = F) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id")
+
+IMCs[["low_max"]] <- intramodularConnectivity(adjMat = adj[["low"]],
+                                  colors = modules[["max"]]$module,
+                                  scaleByMax = F) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id")
+
+#Evaluate connectivity using the consensus colors on the high network and low
+#network individually, then shows up how the 
+IMCs[["high_consensus"]] <- intramodularConnectivity(adjMat = adj[["high"]],
+                                  colors = modules[["consensus"]]$module,
+                                  scaleByMax = F) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id")
+
+IMCs[["low_consensus"]] <- intramodularConnectivity(adjMat = adj[["low"]],
+                                  colors = modules[["consensus"]]$module,
+                                  scaleByMax = F) %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ensembl_gene_id")
+
+
+modules[["max"]] %<>% 
+  left_join(IMCs[["high_max"]] %>%
+              select(ensembl_gene_id, kWithin),
+            by = "ensembl_gene_id",
+            suffix = c("", ".high")) %>% 
+  left_join(IMCs[["low_max"]] %>%
+              select(ensembl_gene_id, kWithin),
+            by = "ensembl_gene_id",
+            suffix = c("", ".low")) 
+
+modules[["consensus"]] %<>% 
+  left_join(IMCs[["high_consensus"]] %>%
+              select(ensembl_gene_id, kWithin),
+            by = "ensembl_gene_id",
+            suffix = c("", ".high")) %>% 
+  left_join(IMCs[["low_consensus"]] %>%
+              select(ensembl_gene_id, kWithin),
+            by = "ensembl_gene_id",
+            suffix = c("", ".low")) 
+
+modules_summary[["consensus"]] %<>% left_join(
+  modules[["consensus"]] %>%
+    select("module", "kWithin.high", "kWithin.low") %>%
+    group_by(module) %>%
+    summarize(kWithin.high_sum = sum(kWithin.high),
+              kWithin.low_sum = sum(kWithin.low)) %>%
+    ungroup(),
+  by = "module")
+
+modules_summary[["max"]] %<>% left_join(
+  modules[["max"]] %>%
+    select("module", "kWithin.high", "kWithin.low") %>%
+    group_by(module) %>%
+    summarize(kWithin.high_sum = sum(kWithin.high),
+              kWithin.low_sum = sum(kWithin.low)) %>%
+    ungroup(),
+  by = "module")
+```
+
+
+# Ontology
+Ontology enrichment via clusterProfiler
+## Network hub genes
+```{r}
+tmpFile <- "RNA211105TP_CeA_GO.RData"
+if (file.exists(tmpFile)) {
+  cat("Using existing GO data.\n")
+  load(tmpFile)
+}
+```
+
+```{r}
+if (!exists("goInfo")) {
+  goInfo <- setupGO()
+}
+```
+
+## Hubs GO
+```{r}
+if (!exists("hubs_GO")) {
+hubs_GO <- list()
+hubs_GO_unclustered <- list()
+
+hubs_GO[["high"]] <- networkGOEnrichment(hubs[["high"]])
+hubs_GO[["low"]] <- networkGOEnrichment(hubs[["low"]])
+hubs_GO[["consensus"]] <- networkGOEnrichment(hubs[["consensus"]])
+hubs_GO[["max"]] <- networkGOEnrichment(hubs[["max"]])
+hubs_GO[["diff"]] <- networkGOEnrichment(hubs[["diff"]])
+
+hubs_GO_unclustered[["high"]]      <- postProcessGO(hubs_GO[["high"]], cluster = F)
+hubs_GO_unclustered[["low"]]       <- postProcessGO(hubs_GO[["low"]], cluster = F)
+hubs_GO_unclustered[["consensus"]] <- postProcessGO(hubs_GO[["consensus"]], cluster = F)
+hubs_GO_unclustered[["max"]]       <- postProcessGO(hubs_GO[["max"]], cluster = F)
+hubs_GO_unclustered[["diff"]]       <- postProcessGO(hubs_GO[["diff"]], cluster = F)
+
+hubs_GO[["high"]] <- postProcessGO(hubs_GO[["high"]])
+hubs_GO[["low"]] <- postProcessGO(hubs_GO[["low"]])
+hubs_GO[["consensus"]] <- postProcessGO(hubs_GO[["consensus"]])
+hubs_GO[["max"]] <- postProcessGO(hubs_GO[["max"]])
+hubs_GO[["diff"]] <- postProcessGO(hubs_GO[["diff"]])
+}
+```
+
+## Unique Hubs GO
+```{r}
+if (!exists("unique_hubs_GO")) {
+  unique_hubs_GO <- list()
+  
+  plan(sequential)
+  plan(multisession, workers = 7)
+  unique_hubs_GO <- unique_hubs %>%
+    lapply(function(x) x %>%
+             pull(ensembl_gene_id)) %>%
+    future_map(enrichGO_wrapped,
+               universe = DE$ensembl_gene_id,
+               .options = furrr_options(seed = NULL))
+  plan(sequential)
+  
+  unique_hubs_GO_unclustered <- postProcessGO(unique_hubs_GO, cluster = F)
+  
+  unique_hubs_GO <- postProcessGO(unique_hubs_GO)
+}
+```
+## Differential GO
+```{r}
+if (!exists("differential_GO")) {
+  tmp_N <- 750
+  DE_GO <- 
+    list(DE_up = DE %>%
+           filter(is.DE == T,
+                  logFC > 0) %>%
+           slice_max(logFC, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DE_down = DE %>%
+           filter(is.DE == T,
+                  logFC < 0) %>%
+           slice_min(logFC, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DE = DE %>%
+           filter(is.DE == T) %>%
+           slice_max(abs(logFC), n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DE_pval = DE %>%
+           filter(is.DE == T) %>%
+           slice_min(p.adj, n = tmp_N) %>%
+           pull(ensembl_gene_id))
+  DV_GO <- 
+    list(DV = DV %>%
+           filter(is.DV == T) %>%
+           slice_max(abs(logFC), n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DV_up = DV %>%
+           filter(is.DV == T,
+                  logFC > 0) %>%
+           slice_max(logFC, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DV_down = DV %>%
+           filter(is.DV == T,
+                  logFC < 0) %>%
+           slice_min(logFC, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DV_pval = DV %>%
+           filter(is.DV == T) %>%
+           slice_min(p.adj, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DW = DW %>%
+           filter(is.DW == T) %>%
+           slice_max(abs(logFC), n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DW_up = DW %>%
+           filter(is.DW == T,
+                  logFC > 0) %>%
+           slice_max(logFC, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DW_down = DW %>%
+           filter(is.DW == T,
+                  logFC < 0) %>%
+           slice_min(logFC, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DW_pval = DW %>%
+           filter(is.DW == T) %>%
+           slice_min(p.adj, n = tmp_N) %>%
+           pull(ensembl_gene_id),
+         DE_DW = diffResults %>%
+           filter(is.DE == T,
+                  is.DW == T) %>%
+           pull(ensembl_gene_id),
+         DE_DV = diffResults %>%
+           filter(is.DE == T,
+                  is.DV == T) %>%
+           pull(ensembl_gene_id),
+         DV_DW = diffResults %>%
+           filter(is.DV == T,
+                  is.DW == T) %>%
+           pull(ensembl_gene_id),
+         DE_DW_DV = diffResults %>%
+           filter(is.DE == T,
+                  is.DW == T,
+                  is.DV == T) %>%
+           pull(ensembl_gene_id),
+         DE_high = intersect(DE %>%
+                               filter(is.DE == T) %>%
+                               pull(ensembl_gene_id),
+                             unique_hubs[["high"]] %>%
+                               pull(ensembl_gene_id)),
+         DE_low = intersect(DE %>%
+                              filter(is.DE == T) %>%
+                              pull(ensembl_gene_id),
+                            unique_hubs[["low"]] %>%
+                              pull(ensembl_gene_id)),
+         DE_high_con = intersect(DE %>%
+                                   filter(is.DE == T) %>%
+                                   pull(ensembl_gene_id),
+                                 unique_hubs[["high_consensus"]] %>%
+                                   pull(ensembl_gene_id)),
+         DE_low_con = intersect(DE %>%
+                                  filter(is.DE == T) %>%
+                                  pull(ensembl_gene_id),
+                                unique_hubs[["low_consensus"]] %>%
+                                  pull(ensembl_gene_id)))
+  DV_GO <- c(DV_GO,
+             list(
+               DV_high = intersect(DV %>%
+                                     filter(is.DV == T) %>%
+                                     pull(ensembl_gene_id),
+                                   unique_hubs[["high"]] %>%
+                                     pull(ensembl_gene_id)),
+               DV_low = intersect(DV %>%
+                                    filter(is.DV == T) %>%
+                                    pull(ensembl_gene_id),
+                                  unique_hubs[["low"]] %>%
+                                    pull(ensembl_gene_id)),
+               DV_high_con = intersect(DV %>%
+                                         filter(is.DV == T) %>%
+                                         pull(ensembl_gene_id),
+                                       unique_hubs[["high_consensus"]] %>%
+                                         pull(ensembl_gene_id)),
+               DV_low_con = intersect(DV %>%
+                                        filter(is.DV == T) %>%
+                                        pull(ensembl_gene_id),
+                                      unique_hubs[["low_consensus"]] %>%
+                                        pull(ensembl_gene_id)),
+               DW_high = intersect(DW %>%
+                                     filter(is.DW == T) %>%
+                                     pull(ensembl_gene_id),
+                                   unique_hubs[["high"]] %>%
+                                     pull(ensembl_gene_id)),
+               DW_low = intersect(DW %>%
+                                    filter(is.DW == T) %>%
+                                    pull(ensembl_gene_id),
+                                  unique_hubs[["low"]] %>%
+                                    pull(ensembl_gene_id)),
+               DW_high_con = intersect(DW %>%
+                                         filter(is.DW == T) %>%
+                                         pull(ensembl_gene_id),
+                                       unique_hubs[["high_consensus"]] %>%
+                                         pull(ensembl_gene_id)),
+               DW_low_con = intersect(DW %>%
+                                        filter(is.DW == T) %>%
+                                        pull(ensembl_gene_id),
+                                      unique_hubs[["low_consensus"]] %>%
+                                        pull(ensembl_gene_id))
+             ))
+  
+  DV_GO[["DE_Unique"]] = union(DV_GO$DE_high,
+                               DV_GO$DE_low)
+  DV_GO[["DV_Unique"]] = union(DV_GO$DV_high,
+                               DV_GO$DV_low)
+  DV_GO[["DW_Unique"]] = union(DV_GO$DW_high,
+                               DV_GO$DW_low)
+  DV_GO[["Diff_High"]] = purrr::reduce(
+    list(DV_GO$DE_high,
+         DV_GO$DV_high,
+         DV_GO$DW_high),
+    union)
+
+  DV_GO[["Diff_Low"]] = purrr::reduce(
+    list(DV_GO$DE_low,
+         DV_GO$DV_low,
+         DV_GO$DW_low),
+    union)  
+  
+  DV_GO[["Diff_Unique"]] = union(DV_GO$Diff_High, DV_GO$Diff_Low)
+  
+
+  DV_GO[["Diff_High_con"]] = purrr::reduce(
+    list(DV_GO$DE_high_con,
+         DV_GO$DV_high_con,
+         DV_GO$DW_high_con),
+    union)
+
+  DV_GO[["Diff_Low_con"]] = purrr::reduce(
+    list(DV_GO$DE_low_con,
+         DV_GO$DV_low_con,
+         DV_GO$DW_low_con),
+    union)  
+  
+  DV_GO[["Diff_Unique_con"]] = union(DV_GO$Diff_High_con, DV_GO$Diff_Low_con)
+  
+  
+  plan(sequential)
+  plan(multisession, workers = 15)
+  
+  DE_GO <- c(DE_GO, DV_GO)
+  
+  DE_GO <- DE_GO %>%
+    future_map(enrichGO_wrapped,
+               universe = DE$ensembl_gene_id,
+               .options = furrr_options(seed = NULL))
+  
+  plan(sequential)   
+  
+  differential_GO_unclustered <- postProcessGO(DE_GO, cluster = F)
+  
+  differential_GO <- postProcessGO(DE_GO)
+  rm(DE_GO, DV_GO, tmp_N)
+}
+```
+
+### Save Go Results
+```{r}
+save(
+  hubs_GO,
+  unique_hubs_GO,
+  differential_GO,
+  hubs_GO_unclustered,
+  unique_hubs_GO_unclustered,
+  differential_GO_unclustered,
+  goInfo,
+  file = tmpFile
+)
+rm(tmpFile)
+```
+
+
+# Exports
+
+```{r}
+### Module summary
+tmpFile <- "RNA211105TP_CeA_modules_hubs.RData"
+save(
+  hubs,
+  hubs_summary,
+  modules_summary,
+  modules,
+  file = tmpFile
+)
+rm(tmpFile)
+```
+
+
+```{r}
+save(file = "RNA211105TP_WGCNA.RData",
+     DE,
+     DV,
+     DW,
+     diffResults,
+     differential_GO,
+     differential_GO_unclustered,
+     hubs,
+     hubs_summary,
+     hubs_GO,
+     hubs_GO_unclustered,
+     modules,
+     modules_summary,
+     unique_hubs,
+     unique_hubs_GO,
+     unique_hubs_GO_unclustered,
+     enrichInfo,
+     goInfo)
+
+
+#DEDVDW
+write.xlsx(list(all = diffResults,
+                 DE = DE,
+                 DV = DV,
+                 DW = DW),
+           file = "RNA211105TP_CeA_DE_DV_DW.xlsx",
+           colNames = TRUE)
+```
+
+```{r}
+for (networkofInterest in names(modules)) {
+  tmp_modules <- unique(modules[[networkofInterest]]$module) 
+  names(tmp_modules) <- tmp_modules
+  tmp_modules <- tmp_modules %>%
+    map(function(x) modules[[networkofInterest]] %>% filter(module == x))
+  
+  tmp_list <- c(list(network_summary = modules_summary[[networkofInterest]],
+                     network_genes = modules[[networkofInterest]]),
+                tmp_modules)
+  
+  write.xlsx(tmp_list,
+             file = paste0("RNA211105TP_CeA_",
+                           networkofInterest, "_Network_Modules.xlsx"),
+             colNames = TRUE)
+  
+  tmp_modules <- unique(hubs[[networkofInterest]]$module) 
+  names(tmp_modules) <- tmp_modules
+  tmp_modules <- tmp_modules %>%
+    map(function(x) hubs[[networkofInterest]] %>% filter(module == x))
+  
+  tmp_list <- c(list(hubs_summary = hubs_summary[[networkofInterest]],
+                     hubs_genes = hubs[[networkofInterest]]),
+                tmp_modules)
+  
+  write.xlsx(tmp_list,
+             file = paste0("RNA211105TP_CeA_",
+                           networkofInterest, "_Network_Hubs.xlsx"),
+             colNames = TRUE)
+  
+  write.xlsx(hubs_GO[[networkofInterest]],
+             file = paste0("RNA211105TP_CeA_",
+                           networkofInterest, "_Network_Hubs_GO.xlsx"),
+             colNames = TRUE)
+}#end for
+```
+
+
+```{r}
+write.xlsx(differential_GO,
+           file = "RNA211105TP_CeA_Differential_GO.xlsx",
+           colNames = TRUE)
+write.xlsx(unique_hubs_GO,
+           file = "RNA211105TP_CeA_unique_hubs_GO.xlsx",
+           colNames = TRUE)
+write.xlsx(unique_hubs,
+           file = "RNA211105TP_CeA_unique_hubs.xlsx",
+           colNames = TRUE)
+```
+

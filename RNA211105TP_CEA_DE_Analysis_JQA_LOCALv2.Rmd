@@ -1,0 +1,950 @@
+---
+title: "RNA211105TP - HSCC Derived Selected Lines - Central Nucleus of the Amigdala - DE Analysis"
+output:
+  html_document:
+    code_folding: hide
+    df_print: kable
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+editor_options: 
+  chunk_output_type: console
+---
+
+Only difference from v1 is fetching Ensembl 105 (same used for alinging), rather
+than current annotation.
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(warning = FALSE,
+                      message = TRUE,
+                      tidy    = TRUE,
+                      tidy.opts = list(blank = FALSE, width.cutoff = 80))
+
+```
+#Initialization
+
+## Load libraries 
+```{r load.libraries, echo=FALSE }
+#Core libraries
+library(edgeR)
+library(biomaRt)
+
+#Tidyverse
+library(plyr)
+library(tidyverse)
+library(kableExtra)
+
+#Plotting
+library(ggplot2)
+library(patchwork)
+library(ggrepel)
+library(ggpubr)
+library(ggstatsplot)
+library(gridExtra)
+library(ggdendro)
+library(VennDiagram)
+library(ggVennDiagram)
+library(ggthemes)
+library(cowplot)
+
+#Data export
+library(openxlsx) #Exporting lists
+library(readxl)
+
+#Other
+library(network)
+
+```
+##Load functions
+```{r load functions}
+# Set working directory to the file path directory
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+
+# These are functions for performing and visualizing common exploratory data 
+# analysis steps for statistics and PCA.
+source( "../../../../R/PCA_Plotting_Functions.R")
+
+#matchup plots
+source( "../../../../R/matchup_plot.R")
+
+# Default kable table
+kableDefault <- function(table, ...) {
+  knitr::kable(table, ...) %>%
+    kable_styling(full_width = T,
+                  fixed_thead = T,
+                  bootstrap_options = c("hover","striped"))
+}
+```
+
+
+## Gather data (counts and phenotype)
+
+Here required libraries are loaded. \
+Sample names in the raw data and in the phenotype table are cleaned up to follow the same format pattern. 
+
+```{r gather.data}
+# read raw data
+geneReadsOriginal = read.table("RNA211105TP.txt",
+                               header = T,  stringsAsFactors = F,
+                               sep = "\t", row.names = 1)
+
+geneReadsOriginal_Info <- geneReadsOriginal[, c(1,3)]
+geneReadsOriginal <- geneReadsOriginal[, 4:ncol(geneReadsOriginal)]
+
+# read sample IDs, as output from the STAR alignment process
+sampleNames <- read.table("RNA211105TP.sampleInfo.txt", header = T,
+                           sep = "\t", stringsAsFactors = F)
+
+# Some string cleaning, use 'S' as prefix for sample names beginning with 
+# numbers, rather than 'X'
+colnames(geneReadsOriginal) <- gsub("X", "", names(geneReadsOriginal))
+colnames(geneReadsOriginal) <- 
+  sampleNames[match(names(geneReadsOriginal), sampleNames$ReadsetId), 6]
+
+# Read in sample data (factors, phenotype, etc).
+phenotype <- read.table("RNA211105TP_sample_key.txt", header = T,
+                        sep = "\t", stringsAsFactors = F)
+phenotype$SampleID <- paste("S", phenotype$SampleName, sep = "")
+phenotype$file.name <- 
+  sampleNames[match(phenotype$SampleID, sampleNames$SubjectId), 4]
+
+sampleNames <- sampleNames[order(sampleNames$SubjectId), ]
+geneReadsOriginal <- geneReadsOriginal[, order(names(geneReadsOriginal))]
+phenotype <- phenotype[order(phenotype$SampleID), ]
+rownames(phenotype) <- phenotype$SampleID
+#Sanity checks on ordering
+cat("STAR raw gene count and sample infomation files are sorted: ", 
+    all(sampleNames$SubjectId == colnames(geneReadsOriginal)),
+    "\n")
+cat("STAR sample infomation and sample factor files are sorted: ", 
+    all(sampleNames$SubjectId == phenotype$SampleID),
+    "\n")
+
+phenotype %>%
+  kableDefault(caption = "Phenotype Data:")
+
+phenotypeOriginal <- phenotype
+```
+
+## Gather annotation
+
+Gene annotation is loaded in order to add gene names to tables. 
+Only genes in chromosomes 1 through 20, X, and Y, will be included in the 
+analysis. This also helps on removing pseudogenes or mithochondrial genes which
+sometimes present aberrantly high counts.
+
+```{r annot}
+# library(biomaRt)
+if (file.exists("transcriptInfoMouse105.RData")) {
+  cat("Using existing mouse gene annotation located in transciptInfoMouse.RData\n")
+  load("transcriptInfoMouse105.RData")
+} else {
+  cat("Loading mouse gene annotation info via biomart.\n")
+  mart <- useEnsembl(biomart = "genes",
+                  dataset = "mmusculus_gene_ensembl",
+                  version = 105)
+  #listAttributes(mart)
+  transcriptInfoMouse=getBM(attributes=c("ensembl_gene_id",
+                                         "external_gene_name", 
+                                         "description",
+                                         "chromosome_name", 
+                                         "entrezgene_id",
+                                         "gene_biotype"), 
+                             mart=mart, useCache = FALSE)
+  save(transcriptInfoMouse, file="transcriptInfoMouse105.RData")
+  rm(mart)
+}
+
+all(rownames(geneReadsOriginal) %in% transcriptInfoMouse$ensembl_gene_id)
+
+#Genes in our RNA-Seq data
+transcriptInfoMouse_Present <- transcriptInfoMouse %>%
+  filter(ensembl_gene_id %in% rownames(geneReadsOriginal))
+
+#Distinct genes
+transcriptInfoMouse_UniqueENS <- transcriptInfoMouse_Present %>%
+  distinct(ensembl_gene_id, .keep_all = TRUE)
+rownames(transcriptInfoMouse_UniqueENS) <-
+  transcriptInfoMouse_UniqueENS$ensembl_gene_id
+
+
+#Double check we only have genes in the RNA-Seq data
+tmp_commonENS <- 
+  intersect(transcriptInfoMouse_UniqueENS$ensembl_gene_id,
+            rownames(geneReadsOriginal))
+
+transcriptInfoMouse_EnsGene <- transcriptInfoMouse_UniqueENS[tmp_commonENS, ]
+
+#Add 'SamplesWithReads' from our STAR alignment process to the annotation
+transcriptInfoMouse_EnsGene <- left_join(
+  transcriptInfoMouse_EnsGene,
+  geneReadsOriginal_Info %>%
+    select(-GeneName) %>%
+    rownames_to_column(var = "ensembl_gene_id")
+)
+rownames(transcriptInfoMouse_EnsGene) <- transcriptInfoMouse_EnsGene$ensembl_gene_id
+
+cat("Only genes in chromosomes 1 through 20, X, and Y, will be",
+"included in the analysis.\n")
+
+# Keep track of all the genes we drop
+droppedGenes <- transcriptInfoMouse_EnsGene %>% 
+  filter(!(chromosome_name %in% c(1:20, "X", "Y"))) %>%
+  mutate(reason = "non-chrom")
+
+transcriptInfoMouse_EnsGene <- transcriptInfoMouse_EnsGene %>% 
+  filter(chromosome_name %in% c(1:20, "X", "Y"))
+
+cat(dim(droppedGenes)[1], 
+     "genes dropped for not being on chromosomes 1-20, X or Y.\n")
+
+droppedGenes %>%
+  mutate(n_total = n()) %>%
+  group_by(gene_biotype) %>%
+  summarise(n=n(),
+            perc=n()/mean(n_total)*100)%>%
+  arrange(desc(n)) %>%
+  kableDefault(caption = "Dropped genes for Non chromosomal:")
+
+geneReadsOriginal <- 
+  geneReadsOriginal[rownames(geneReadsOriginal) %in% transcriptInfoMouse_EnsGene$ensembl_gene_id, ]
+
+rm(transcriptInfoMouse_Present,
+   transcriptInfoMouse_UniqueENS)
+rm(list = ls(pattern = "tmp", all.names = TRUE))
+```
+
+```{r sample info tables}
+phenotype %>%
+  summarise(across(everything(), n_distinct)) %>% 
+  kableDefault(caption = "Distinct entries in every sample information category")
+
+phenotype %>%
+  count(Genotype) %>%
+  kableDefault(caption = "Samples per genotype:") 
+
+
+phenotype %>%
+  count(Sex) %>%
+  kableDefault(caption = "Samples per sex:") 
+
+```
+
+
+# Exploratory Data Analysis
+
+## Xist Check
+```{r xist}
+xistGene = 
+  transcriptInfoMouse_EnsGene[
+    which(transcriptInfoMouse_EnsGene[, "external_gene_name"] == "Xist"),
+    1]
+
+xist <- as.data.frame(t(geneReadsOriginal[xistGene, ]))
+colnames(xist) = "xistCount"
+xist$id <- rownames(xist)
+xist <- left_join(xist, phenotype, by = c("id" = "SampleID"))
+```
+
+## Y-Chromosome Check
+```{r gender check Y chrom,fig.width = 5, fig.height = 5}
+# Find the gene with highest average expression among males
+
+yRows <- rownames(geneReadsOriginal) %in% (transcriptInfoMouse_EnsGene %>%
+  filter(chromosome_name == "Y") %>%
+  pull(ensembl_gene_id))
+ySamples <- phenotype %>% 
+  filter(Sex == "M") %>% pull(SampleID)
+
+yExpression <- geneReadsOriginal[yRows, ySamples] %>%
+  mutate(mean = rowMeans(.)) %>%
+  filter(mean > 0) %>%
+  arrange(desc(mean)) %>%
+  mutate(n=row_number())
+
+ggscatter(yExpression, x = "n", y = "mean",
+          title = "Mean expression of Y genes among male samples",
+          ylab = "Mean gene expression",
+          xlab = "Gene rank")  
+
+cat("There are 5 y-chrom genes with count data expression.\n")
+  
+yGenes <- yExpression %>% slice_max(mean, n=5) %>% rownames()
+
+transcriptInfoMouse_EnsGene %>%
+  filter(ensembl_gene_id %in% yGenes) %>%
+  select(ensembl_gene_id, external_gene_name, chromosome_name, gene_biotype) %>%
+  kableDefault(caption = "Potential Y chromosome genes:")
+
+cat("Lets use all of the protein coding ones.\n")
+
+yGenes <- yGenes[2:5]
+
+#We can use the same logic as above..
+
+yCount <- as.data.frame(t(geneReadsOriginal[yGenes, ])) %>%
+  mutate(yCount = rowSums(.),
+         id = rownames(.))
+yCount <- left_join(yCount, phenotype, by = c("id"="SampleID"))
+```
+
+```{r xist fig1, fig.width = 10, fig.height = 5}
+ggbetweenstats(xist,
+               x = Sex,
+               y = xistCount,
+               pairwise.comparisons = FALSE,
+               results.subtitle = FALSE,
+               centrality.plotting = FALSE,
+               ggtheme = theme_classic(),
+               palette = "Dark2",
+               plot.type = "box",
+               outlier.tagging = TRUE,
+               outlier.label = id,
+               outlier.color = "red",
+               title = "Xist count by sex")+
+ggbetweenstats(yCount,
+               x = Sex,
+               y = yCount,
+               pairwise.comparisons = FALSE,
+               results.subtitle = FALSE,
+               centrality.plotting = FALSE,
+               ggtheme = theme_classic(),
+               palette = "Dark2",
+               plot.type = "box",
+               outlier.tagging = TRUE,
+               outlier.label = id,
+               outlier.color = "red",
+               title = "yGenes count sum by sex")
+```
+
+```{r gender correction}
+yCount %>%
+  filter(id %in% c("S71", "S25", "S42")) %>%
+  select(id, Sex, Genotype, Family, LibraryPrepBatch) %>%
+  kableDefault(caption = "Potentially Misgendered mice (yCount):")
+
+
+droppedSamples <- phenotype %>% 
+  filter(SampleID %in% c("S71", "S25", "S42")) %>%
+  mutate(reason = "Misgender")
+
+phenotype <- phenotype %>% 
+  filter(!(SampleID %in% c("S71", "S25", "S42")))
+geneReadsOriginal <- geneReadsOriginal %>%
+  select(phenotype$SampleID)
+
+rownames(phenotype) <- phenotype$SampleID
+
+cat("STAR raw gene count and sample infomation files are sorted: ", 
+    all(phenotype$SampleID == colnames(geneReadsOriginal)),
+    "\n")
+
+rm(list = ls(pattern = "tmp", all.names = TRUE))
+```
+
+## Stats/PCA
+Below we see that there are extremely high read counts for some genes. \
+those are likely to be PCR artifacts from library preparation. \
+We also see the presence of genes with zero counts throughout. \ 
+We will remove those in the process of filtering out genes with 1 count-per-million or less in average across samples.
+
+```{r summary.stats, fig.width = 10, fig.height = 5}
+statsPerSample <- plot_stats(geneReadsOriginal, phenotype)
+statsPerSample$plot
+
+```
+
+```{r summary.stats2, fig.width = 10, fig.height = 10}
+plottingData_PCA_All <- quiet_plot_PCA(geneReadsOriginal,
+                                 phenotype,
+                                 c("LibraryPrepBatch", "Genotype",
+                                   "Sex", "Family"),
+                                 fdr = "fdr")
+plottingData_PCA_All$summary_plot
+```
+
+```{r Initial PCA, fig.width = 5, fig.height = 5}
+cat("There's something going on with an HP being grouped with the LPs on PC3, lets look into that.\n")
+
+ggscatter(plottingData_PCA_All$plottingData,
+          x = "PC4",
+          y = "PC3",
+          label = "joinKey",
+          label.select = phenotype[phenotype$Genotype=="HP", "SampleID"],
+          color = "Genotype",
+          repel = TRUE)
+cat("It is sample S105\n")
+
+phenotype[which(phenotype$SampleID=="S105"), ] %>%
+  kableDefault(captoin="Sample S105 Info:")
+
+cat("From the MPSSR this sample has the original name 224_CeA_H99_M_259RNAX_TP_SDG2, so if it mislabeled it was during collection?\n")
+
+cat("Note that there are alot of L99s over in that same area, lets look at that.. the other families over there are L103, L115, L106, L98, L102\n")
+ggscatter(plottingData_PCA_All$plottingData,
+          x = "PC4",
+          y = "PC3",
+          label = "Family",
+          label.select = c("L99","H99","L103","L115","L106","L98","L102"),
+          color = "Genotype",
+          repel = TRUE)
+
+cat("Yup, none of those jump across.  It is probably supposed to be an L99?  There is no indication of this in the original study file. There is only one L99 male that it could have been swapped with, and it also clusters with the rest of L99.  We should double check this one after normalization, perhaps exclude it from the study.\n")
+
+plottingData_PCA_All$plottingData %>%
+  filter(str_ends(Family,"99")) %>%
+  count(Family) %>%
+  kableDefault(caption = "Counts by family 99:")
+```
+#Data cleaning
+
+## Calculate Counts per million (cpm)
+
+NOTE: CPM is one form of counts normalization where we divide the sum of all counts for each gene by the total gene counts for the sample (which corrects for sequencing depth in each sample) and multiply the result by 1 million (to provide a more convenient number).
+
+```{r cleaning tmps}
+# library(edgeR)
+# Get counts-per-million
+tmp_geneCPM <- geneReadsOriginal %>%
+  mutate(across(everything(), function(x) (x / sum(x)) * 1000000))
+
+# Enter the counts into a DGEList object using the function DGEList in edgeR
+tmp_DGEList <- DGEList(geneReadsOriginal)
+
+```
+## Filter out low read counts  
+
+Number of genes remaining after removing those with counts below 1 cpm threshold  
+
+```{r filter, fig.height=5, fig.width=10}
+# Select genes given a cpm threshold 
+# Remove reads below 1 cpmin average across samples using the min library size:
+
+    tmp_geneCPM %>%
+    mutate(mean = rowMeans(.),
+           protein_coding = 
+             transcriptInfoMouse_EnsGene[rownames(tmp_geneCPM),"gene_biotype"] ==
+             "protein_coding" ) %>%
+    arrange(mean) %>%
+    select(mean, protein_coding) %>% 
+    mutate(perc = row_number()/n(),
+           coding_perc = cumsum(protein_coding)/sum(protein_coding)) %>%
+    filter(mean < 2) %>%
+    slice_sample(prop=0.05) %>%
+    ggplot() +
+    geom_point(aes(x = mean, y = 1-perc,
+                   color = "All Genes")) +
+    geom_point(aes(x = mean, y = 1-coding_perc,
+                   color = "Protein Coding Genes")) +
+    ylab("Fraction remaining") +
+    xlab("CPM Threshold") +
+    ggtitle(paste("Effect of CPM Threshold in CeA")) +
+    theme_classic()
+
+cpmThresh <- 0.5
+
+selectedGenes <- 
+  tmp_geneCPM[(rowSums(tmp_geneCPM) / ncol(tmp_geneCPM)) >= cpmThresh, ]
+
+geneCountsSelected <-  geneReadsOriginal[
+  rownames(geneReadsOriginal[, ]) %in% row.names(selectedGenes), ]
+
+#Keep track of all the genes we drop
+droppedGenes_Lowcount <- data.frame(transcriptInfoMouse_EnsGene) %>% 
+  filter(!(ensembl_gene_id %in% rownames(geneCountsSelected))) 
+
+cat(dim(droppedGenes_Lowcount)[1], "genes dropped for low counts,",
+    length(rownames(geneCountsSelected)), "remain.\n")
+
+droppedGenes_Lowcount %>%
+  mutate(n_total = n()) %>%
+  group_by(gene_biotype) %>%
+  summarise(n=n(),
+            perc=n()/mean(n_total)*100)%>%
+  arrange(desc(n)) %>%
+  kableDefault(caption = "Dropped genes for low CPM, by biotype")
+
+droppedGenes <- bind_rows(droppedGenes,
+                          droppedGenes_Lowcount %>%
+                            mutate(reason = "low cpm"))
+
+rm(droppedGenes_Lowcount)
+rm(list = ls(pattern = "tmp", all.names = TRUE))
+rm(cpmThresh, selectedGenes)
+```
+
+## Drop aberrantly high counts genes
+
+Basic stats after low and extremely high counts genes removal:
+
+```{r drop.aberrant.genes, fig.height=5, fig.width=10}
+tmp_counts <- sort(apply(geneCountsSelected, 1, max))
+tmp_x = (1:20)*7500
+tmp_counts <- sapply(tmp_x, function(x) sum(tmp_counts > x))
+
+ggplot() +
+  geom_point(aes(x = length(rownames(geneCountsSelected)):1,
+                 y = sort(apply(geneCountsSelected, 1, max))/10000)) +
+  xlim(1,50) +
+  xlab("Number of genes") +
+  ylab("Gene count (/10000)") + 
+  theme_classic() +
+  ggtitle("Number of genes with at least count above")
+
+data_frame(cutoff = tmp_x,
+          number = tmp_counts ) %>%
+  arrange(number, cutoff) %>%
+  kableDefault(caption = "Genes with counts higher than:")
+
+tmp_cutoff <- 120000
+
+tmp_drop <- rownames(geneCountsSelected[apply(geneCountsSelected,
+                                          1,
+                                          function(x) any(x >= tmp_cutoff)), ])
+tmp_ndrop <- length(tmp_drop)
+cat(paste("There are", tmp_ndrop, 
+          "genes with equal or above", tmp_cutoff,"read counts in any sample in the",
+          "sequencing data.\n"))
+geneCountsSelected<-
+  geneCountsSelected[!(rownames(geneCountsSelected) %in% tmp_drop),]
+droppedGenes_Highcount <- data.frame(transcriptInfoMouse_EnsGene) %>% 
+  filter(ensembl_gene_id %in% tmp_drop) 
+
+droppedGenes_Highcount %>%
+  mutate(n_total = n()) %>%
+  group_by(gene_biotype) %>%
+  summarise(n=n(),
+            perc=n()/mean(n_total)*100)%>%
+  arrange(desc(n)) %>%
+  kableDefault(caption = "Dropped genes for high count, by biotype")
+
+droppedGenes_Highcount %>%
+  kableDefault(caption = "Dropped genes for high count")
+
+
+droppedGenes <- bind_rows(
+  droppedGenes,
+  droppedGenes_Highcount %>%
+    mutate(reason = "high count")
+)
+
+rm(droppedGenes_Highcount)
+```
+## ISC Outliers
+
+Here we borrow ISC (Inter-Array Correlation) utilized in microarray studies. We
+will call it here "Inter Sample Correlation (ISC)", defined as the Pearson 
+correlation coefficient of the read counts for a given pair of samples. This 
+makes sure that we detect samples with divergent expression levels. A histogram 
+is used to visualize the distribution of the coefficients, while a dendogram
+(product of the average linkage hierarchical clustering with 1-ISC as a distant
+metric) is generated to visualize the relationship between samples.  
+
+```{r iac}
+
+par(mfrow = c(1, 3))
+tmp_ISC <- cor(geneCountsSelected,method="p") 
+hist(tmp_ISC,
+     sub = paste("Mean=", format(mean(tmp_ISC[upper.tri(tmp_ISC)]), digits=3))) 
+tmp_cluster <- hclust(as.dist(1-tmp_ISC), method="average") 
+plot(tmp_cluster, cex=0.7, labels=dimnames(geneCountsSelected)[[2]]) 
+tmp_meanISC <- apply(tmp_ISC, 2, mean) 
+tmp_sdCorr <- sd(tmp_meanISC) 
+tmp_numbersd <- (tmp_meanISC-mean(tmp_meanISC)) / tmp_sdCorr 
+plot(tmp_numbersd, ylim=c(-10, 2), main="Inter Sample Correlations")
+abline(h = -3) 
+tmp_sdout <- -3 
+dropped_outliers <- dimnames(geneCountsSelected)[[2]][tmp_numbersd < tmp_sdout]
+cat("Outliers:", dropped_outliers, "\n")
+
+cat("Adding the potentially mislabeled S105 to the discard list:\n")
+dropped_outliers = c(dropped_outliers, "S105")
+cat("We will remove sample", dropped_outliers, "from the data.")
+
+geneCountsSelected <- geneCountsSelected %>% 
+  data.frame() %>%
+  select( !c(dropped_outliers) )
+
+sampleNamesSelected <- sampleNames %>%
+  data.frame() %>%
+  filter(!(SubjectId %in% c(dropped_outliers)))
+    
+phenotypeSelected <- phenotype %>%
+  data.frame() %>%
+  filter(!(SampleID %in% c(dropped_outliers)))
+
+phenotype %>%
+  filter(SampleID %in% dropped_outliers) %>%
+  kableDefault(caption = "Samples dropped for high ISC:")
+
+droppedSamples <- bind_rows(droppedSamples,
+                            phenotype %>% 
+                              filter(SampleID %in% dropped_outliers) %>%
+                              mutate(reason = "ISC"))
+droppedSamples <- droppedSamples %>%
+  mutate(reason = if_else(SampleID == "S105", "Mis-family",reason))
+
+droppedSamples %>%
+  kableDefault(caption = "Samples dropped summary:")
+
+cat("Selected Gene Counts and sample factor files are sorted: ", 
+    all(phenotypeSelected$SampleID == colnames(geneCountsSelected)),
+    "\n")
+
+par(mfrow = c(1, 1))
+#Cleanup tmps
+rm(list = ls(pattern = "tmp", all.names = TRUE))
+```
+## Stats/PCA
+
+```{r post drops stats, fig.width = 10, fig.height = 5}
+statsPerSample_postDrops <- plot_stats(geneCountsSelected, phenotypeSelected)
+statsPerSample_postDrops$plot
+```
+```{r post drop PCA, fig.width = 10, fig.height = 10}
+plottingData_PCA_postDrops <- quiet_plot_PCA(geneCountsSelected,
+                                 phenotypeSelected,
+                                 c("LibraryPrepBatch","Genotype","Sex","Family"),
+                                 fdr = "fdr")
+plottingData_PCA_postDrops$summary_plot
+```
+
+#DE Analysis
+
+```{r DE_Setup}
+#Make sure things we care about are factors:
+phenotypeSelected <- phenotypeSelected %>%
+  mutate(across(c("Sex",
+                  "Genotype",
+                  "LibraryPrepBatch",
+                  "Family"), factor))
+
+#Add in a sex/genotype interaction factor
+phenotypeSelected <- phenotypeSelected %>%
+  mutate(SxG = fct_cross(Sex, Genotype, sep = "x"))
+
+```
+##Combined
+```{r DE Combined, fig.width = 10, fig.height = 5}
+mod_all <- model.matrix(~0 +as.factor(phenotypeSelected$SxG) +
+                      as.factor(phenotypeSelected$LibraryPrepBatch) )
+colnames(mod_all) <-  c( "FxHP" ,"MxHP", "FxLP", "MxLP", "Batch2",
+                         "Batch3", "Batch4", "Batch5")
+
+contrMatrix_all <- makeContrasts(
+  HPvLP_Both = (FxHP + MxHP) / 2 - (FxLP + MxLP) / 2,
+  HPvLP_Males = MxHP - MxLP,
+  HPvLP_Females = FxHP - FxLP,
+  MvF_Both = (MxHP + MxLP) / 2  - (FxHP + FxLP) / 2,
+  MvF_Low = MxLP - FxLP,
+  MvF_High = MxHP - FxHP,
+  PC4 = MxHP - FxLP,
+  Pc5 = FxHP - MxLP,
+  Int = (MxHP-MxLP) - (FxHP-FxLP),
+  levels = colnames(mod_all))
+
+
+d_all = DGEList(counts = geneCountsSelected,
+                genes = transcriptInfoMouse_EnsGene[match(
+                  rownames(geneCountsSelected),
+                  transcriptInfoMouse_EnsGene$ensembl_gene_id), ])
+
+d_all <- calcNormFactors(d_all)
+
+
+v_all <- voom(d_all, mod_all, plot = TRUE)
+fit_all <- lmFit(v_all, mod_all)
+fit_all <- contrasts.fit(fit_all , contrasts = contrMatrix_all )
+fit_all <- eBayes(fit_all)
+plotSA(fit_all, main="Mean-variance trend")
+summary(decideTests(fit_all, method = "global")) %>%
+  kableDefault(caption="All Data DE (Global):")
+summary(decideTests(fit_all)) %>%
+  kableDefault(caption="All Data DE (Individual):")
+
+voomNormalized_all <- as.data.frame(v_all$E)
+tmp_stats <- plot_stats(voomNormalized_all, phenotypeSelected)
+tmp_stats$plot
+
+```
+
+
+```{r de combined export and PCA,  fig.width = 10, fig.height = 10}
+tmp_PCA <- quiet_plot_PCA(voomNormalized_all , phenotypeSelected, 
+                    c("LibraryPrepBatch", "Sex", "Genotype",
+                      "SxG"),
+                    fdr = "fdr")
+
+tmp_PCA$summary_plot
+
+```
+
+```{r}
+knitr::knit_exit()
+plottingData_PCA <- tmp_PCA
+save(file="RNA211105TP_CEA_DE.RData", fit_all, voomNormalized_all, phenotypeSelected, plottingData_PCA)
+save(file="RNA211105TP_CEA_Gene_Sample_Info.RData", droppedGenes, droppedSamples)
+```
+
+```{r de combined export and PCA2,  fig.width = 10, fig.height = 10}
+for (contrast in colnames(fit_all)) {
+  write_csv(x = topTable(fit_all[, contrast], n = Inf),
+            file = paste0("RNA211105TP_CEA_LimmaVoom_DE_", contrast, ".csv"),
+            quote = "needed")
+} #end export for
+
+write_csv(x = voomNormalized_all %>%
+            rownames_to_column(var="ensembl_gene_id"),
+          file = "RNA211105TP_CEA_LimmaVoom_NormalizedCounts.csv",
+          quote = "needed")
+
+write_csv(x = cpm(d_all, log = TRUE) %>% as.data.frame %>%
+            rownames_to_column(var="ensembl_gene_id"),
+          file = "RNA211105TP_CEA_logTMM_NormalizedCounts.csv",
+          quote = "needed")
+
+write_csv(x = geneCountsSelected %>%
+            rownames_to_column(var="ensembl_gene_id"),
+          file = "RNA211105TP_CEA_RAWCounts.csv",
+          quote = "needed")
+```
+
+#### Drop batch 1
+```{r DE drop batch 1}
+#Lets just drop batch 1 and see what happens
+phenotypeSelected_drop1 <- phenotypeSelected %>%
+  filter(LibraryPrepBatch != 1)
+
+geneCountsSelected_drop1 <- geneCountsSelected[, phenotypeSelected_drop1$SampleID]
+
+mod_all_drop1 <- model.matrix(~0 + phenotypeSelected_drop1$SxG +
+                                factor(phenotypeSelected_drop1$LibraryPrepBatch))
+colnames(mod_all_drop1) <-  c( "FxHP" ,"MxHP", "FxLP", "MxLP", 
+                         "Batch3", "Batch4", "Batch5")
+
+contrMatrix_all_drop1 <- makeContrasts(
+  HPvLP_Both = (FxHP + MxHP) / 2 - (FxLP + MxLP) / 2,
+  HPvLP_Males = MxHP - MxLP,
+  HPvLP_Females = FxHP - FxLP,
+  MvF_Both = (MxHP + MxLP) / 2  - (FxHP + FxLP) / 2,
+  MvF_Low = MxLP - FxLP,
+  MvF_High = MxHP - FxHP,
+  Int = (MxHP-MxLP) - (FxHP-FxLP),
+  levels = colnames(mod_all_drop1))
+
+
+d_all_drop1 = DGEList(counts = geneCountsSelected_drop1,
+                genes = transcriptInfoMouse_EnsGene[match(
+                  rownames(geneCountsSelected_drop1),
+                  transcriptInfoMouse_EnsGene$ensembl_gene_id), ])
+d_all_drop1 <- calcNormFactors(d_all_drop1)
+
+v_all_drop1 <- voom(d_all_drop1, mod_all_drop1, plot = TRUE)
+fit_all_drop1 <- lmFit(v_all_drop1, mod_all_drop1)
+fit_all_drop1 <- contrasts.fit(fit_all_drop1, contrasts = contrMatrix_all_drop1 )
+fit_all_drop1 <- eBayes(fit_all_drop1)
+plotSA(fit_all_drop1, main="Mean-variance trend")
+
+voomNormalized_all_drop1 <- as.data.frame(v_all_drop1$E)
+tmp_stats <- plot_stats(voomNormalized_all_drop1, phenotypeSelected_drop1)
+tmp_stats$plot
+
+
+summary(decideTests(fit_all_drop1), method = "global") %>%
+  kableDefault(caption="All Data DE (No batch 1):")
+```
+```{r,  fig.width = 10, fig.height = 10}
+
+#write.csv(voomNormalized_all,
+#          file = "RNA211206TP_NAcC_LimmaVoom_NormalizedCounts.csv", quote=F)
+
+tmp_PCA_drop1 <- quiet_plot_PCA(voomNormalized_all_drop1 , phenotypeSelected_drop1, 
+                    c("LibraryPrepBatch","Sex","Genotype","SxG"))
+tmp_PCA_drop1$summary_plot
+```
+
+
+#### Batch as random
+Removing batch 1 didn't accomplish much, lets try treating batch as a random
+effect (duplicatecorrelation)
+```{r}
+
+mod_all_corr <- model.matrix(~0 + phenotypeSelected$SxG)
+colnames(mod_all_corr) <-  c("FxHP", "MxHP", "FxLP", "MxLP")
+
+contrMatrix_all_corr <- makeContrasts(
+  HPvLP_Both = (FxHP + MxHP) / 2 - (FxLP + MxLP) / 2,
+  HPvLP_Males = MxHP - MxLP,
+  HPvLP_Females = FxHP - FxLP,
+  MvF_Both = (MxHP + MxLP) / 2  - (FxHP + FxLP) / 2,
+  MvF_Low = MxLP - FxLP,
+  MvF_High = MxHP - FxHP,
+  Int = (MxHP-MxLP) - (FxHP-FxLP),
+  levels = colnames(mod_all_corr))
+
+
+d_all_corr = DGEList(counts = geneCountsSelected,
+                genes = transcriptInfoMouse_EnsGene[match(
+                  rownames(geneCountsSelected),
+                  transcriptInfoMouse_EnsGene$ensembl_gene_id), ])
+d_all_corr <- calcNormFactors(d_all_corr)
+
+v_all_corr <- voom(d_all_corr, mod_all_corr, plot = TRUE)
+
+corfit_all_corr <- 
+  duplicateCorrelation(v_all_corr, mod_all_corr, 
+                       block = phenotypeSelected$LibraryPrepBatch)
+corfit_all_corr$cor
+
+v_all_corr <- voom(d_all_corr, mod_all_corr, plot = TRUE,
+                   block = phenotypeSelected$LibraryPrepBatch,
+                   correlation = corfit_all_corr$consensus.correlation)
+
+corfit_all_corr <- 
+  duplicateCorrelation(v_all_corr, mod_all_corr, 
+                       block = phenotypeSelected$LibraryPrepBatch)
+
+corfit_all_corr$cor
+
+fit_all_corr <- lmFit(v_all_corr, mod_all_corr,
+                   block = phenotypeSelected$LibraryPrepBatch,
+                   correlation = corfit_all_corr$consensus.correlation)
+fit_all_corr <- contrasts.fit(fit_all_corr , contrasts = contrMatrix_all_corr )
+fit_all_corr <- eBayes(fit_all_corr)
+summary(decideTests(fit_all_corr, method = "separate")) %>% ggtexttable(rows = NULL)
+
+
+#That is .. many more DE genes (~2x)
+```
+
+
+#### Quality weights
+```{r}
+#This didn't do much!  Lets try quality weights
+mod_QW <- model.matrix(~0 +as.factor(phenotypeSelected$SxG) +
+                      as.factor(phenotypeSelected$LibraryPrepBatch) )
+colnames(mod_QW) <-  c( "FxHP" ,"MxHP", "FxLP", "MxLP", "Batch2",
+                         "Batch3", "Batch4", "Batch5")
+
+contrMatrix_QW <- makeContrasts(
+  HPvLP_Both = (FxHP + MxHP) / 2 - (FxLP + MxLP) / 2,
+  HPvLP_Males = MxHP - MxLP,
+  HPvLP_Females = FxHP - FxLP,
+  MvF_Both = (MxHP + MxLP) / 2  - (FxHP + FxLP) / 2,
+  MvF_Low = MxLP - FxLP,
+  MvF_High = MxHP - FxHP,
+  Int = (MxHP-MxLP) - (FxHP-FxLP),
+  levels = colnames(mod_all))
+
+
+d_QW = DGEList(counts = geneCountsSelected,
+                genes = transcriptInfoMouse_EnsGene[match(
+                  rownames(geneCountsSelected),
+                  transcriptInfoMouse_EnsGene$ensembl_gene_id), ])
+d_QW <- calcNormFactors(d_QW)
+
+v_QW <- voomWithQualityWeights(d_QW, mod_QW, plot = TRUE)
+
+voomNormalized_QW <- as.data.frame(v_QW$E)
+
+fit_QW <- lmFit(v_QW, mod_QW)
+fit_QW <- contrasts.fit(fit_QW , contrasts = contrMatrix_QW)
+fit_QW <- eBayes(fit_QW)
+summary(decideTests(fit_QW, method = "separate")) %>% ggtexttable()
+
+
+cor(v_QW$targets$sample.weights, as.numeric(phenotypeSelected$Family))
+
+
+#Another increase of 2x
+```
+
+
+##Lines
+Looking at the  LP lines identified earlier as being distinct from the rest of 
+the LP lines:  c("L99","L103","L115","L106","L98","L102")
+```{r DE Lines, fig.width = 10, fig.height = 10}
+
+phenotypeSelected_distinctLines <- phenotypeSelected %>%
+  filter(Genotype == "LP") %>%
+  mutate(distinctFamily =
+           if_else(str_squish(Family) %in%
+                     c("L99","L103","L115","L106","L98","L102"),
+                   "A",
+                   "B"),
+         distinctFamily = factor(distinctFamily),
+         LxS = fct_cross(Sex, distinctFamily, sep = "x"))
+
+geneCountsSelected_distinctLines <- 
+  geneCountsSelected[, phenotypeSelected_distinctLines$SampleID]
+
+mod_lines <- model.matrix(~0 + phenotypeSelected_distinctLines$LxS +
+                            phenotypeSelected_distinctLines$LibraryPrepBatch)
+
+colnames(mod_lines) <-  c("FxA", "MxA", "FxB", "MxB", "Batch2",
+                        "Batch3", "Batch4", "Batch5")
+
+contrMatrix_lines <- makeContrasts(
+  AvB_Both = (FxA + MxA) / 2 - (FxB + MxB) / 2,
+  AvB_Males = MxA - MxB,
+  AvB_Females = FxA - FxB,
+  A_MvF = MxA - FxA,
+  B_MvF = MxB - FxB,
+  levels = colnames(mod_lines))
+
+
+d_lines = DGEList(
+  counts = geneCountsSelected_distinctLines,
+  genes = transcriptInfoMouse_EnsGene[
+    match(rownames(geneCountsSelected_distinctLines),
+          transcriptInfoMouse_EnsGene$ensembl_gene_id), ])
+d_lines <- calcNormFactors(d_lines)
+
+v_lines <- voom(d_lines, mod_lines, plot = TRUE)
+
+voomNormalized_lines <- as.data.frame(v_lines$E)
+
+tmp_PCA <- plot_PCA(as.data.frame(v_lines$E), phenotypeSelected_distinctLines, 
+                    c("LibraryPrepBatch","distinctFamily", "Family", "SxG"), plot = FALSE)
+
+tmp_PCA$summary_plot
+
+fit_lines <- lmFit(v_lines, mod_lines)
+fit_lines <- contrasts.fit(fit_lines , contrasts = contrMatrix_lines)
+fit_lines <- eBayes(fit_lines)
+summary(decideTests(fit_lines, method = "separate"))
+
+topTable(fit_lines[, 1], n = 28)
+topTable(fit_lines[, 2], n = 14)
+topTable(fit_lines[, 3], n = 14)
+topTable(fit_lines[, 4], n = 11)
+topTable(fit_lines[, 5], n = 13)
+```
+
+
+#8/29/23 Test
+Looking to see how parameterization matters
+```{r DE Combined, fig.width = 10, fig.height = 5}
+mod_test <- model.matrix(~0 +as.factor(phenotypeSelected$Genotype) +
+                      as.factor(phenotypeSelected$LibraryPrepBatch) )
+
+colnames(mod_test) <-  c( "HP" ,"LP",  "Batch2",
+                         "Batch3", "Batch4", "Batch5")
+
+contrMatrix_test <- makeContrasts(
+  HPvLP_Both = HP - LP,
+  levels = colnames(mod_test))
+
+
+v_test <- voom(d_all, mod_test, plot = F)
+fit_test <- lmFit(v_test, mod_test)
+fit_test <- contrasts.fit(fit_test , contrasts = contrMatrix_test )
+fit_test <- eBayes(fit_test)
+summary(decideTests(fit_test)) %>%
+  kableDefault(caption="All Data DE (Individual):")
+
+#differences in DE in the hp vs lp comparison of almost nothing
+
+```
